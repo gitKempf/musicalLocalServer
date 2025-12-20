@@ -33,6 +33,7 @@ export interface AuthServiceConfig {
   authServiceUrl: string;
   callbackPort?: number;
   tokenStoragePath?: string;
+  onAuthenticated?: (tokenData: AuthTokenData) => void | Promise<void>;
 }
 
 export class AuthService {
@@ -43,11 +44,13 @@ export class AuthService {
   private authServer: http.Server | null = null;
   private authResolve: ((value: AuthTokenData) => void) | null = null;
   private authReject: ((reason: any) => void) | null = null;
+  private onAuthenticatedCallback: ((tokenData: AuthTokenData) => void | Promise<void>) | null = null;
 
   constructor(config: AuthServiceConfig) {
     this.authServiceUrl = config.authServiceUrl;
     this.callbackPort = config.callbackPort || 17105;
     this.tokenStoragePath = config.tokenStoragePath || path.join(process.env.HOME || '/root', '.musical', 'auth.json');
+    this.onAuthenticatedCallback = config.onAuthenticated || null;
   }
 
   /**
@@ -86,6 +89,13 @@ export class AuthService {
    */
   isAuthenticated(): boolean {
     return this.tokenData !== null;
+  }
+
+  /**
+   * Set callback to be called when authentication completes
+   */
+  setOnAuthenticated(callback: (tokenData: AuthTokenData) => void | Promise<void>): void {
+    this.onAuthenticatedCallback = callback;
   }
 
   /**
@@ -194,6 +204,15 @@ export class AuthService {
         email: tokenData.email,
       });
 
+      // Trigger onAuthenticated callback (e.g., to setup tunnel)
+      if (this.onAuthenticatedCallback) {
+        try {
+          await this.onAuthenticatedCallback(tokenData);
+        } catch (error: any) {
+          logger.warn('⚠️  onAuthenticated callback failed', { error: error.message });
+        }
+      }
+
       return tokenData;
     } catch (error: any) {
       if (error.message === 'Authentication cancelled by user') {
@@ -258,6 +277,15 @@ export class AuthService {
         userId: tokenData.userId,
         email: tokenData.email,
       });
+
+      // Trigger onAuthenticated callback (e.g., to setup tunnel)
+      if (this.onAuthenticatedCallback) {
+        try {
+          await this.onAuthenticatedCallback(tokenData);
+        } catch (error: any) {
+          logger.warn('⚠️  onAuthenticated callback failed', { error: error.message });
+        }
+      }
 
       return tokenData;
     } finally {

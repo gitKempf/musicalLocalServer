@@ -60,10 +60,14 @@ class LocalServer {
       },
     });
 
-    // Initialize AuthService
+    // Initialize AuthService with callback to setup tunnel after auth
     this.authService = new AuthService({
       authServiceUrl: AUTH_SERVICE_URL,
       callbackPort: 17105,
+      onAuthenticated: async (tokenData) => {
+        logger.info('🔐 Authentication completed, setting up tunnel...', { userId: tokenData.userId });
+        await this.setupTunnel();
+      },
     });
 
     this.cloudRegistration = new CloudRegistrationService();
@@ -234,13 +238,22 @@ class LocalServer {
   private async setupTunnel(): Promise<void> {
     logger.info('🌐 Setting up Cloudflare Tunnel...');
 
-    // Get authenticated user ID (or fall back to environment variable)
-    const userId = this.authService.getUserId() || process.env.USER_ID || 'local_user';
-
+    // SECURITY: Do NOT set up tunnel without authentication
     if (!this.authService.isAuthenticated()) {
-      logger.warn('⚠️  Setting up tunnel without authentication');
-      logger.warn('   Tunnel will use fallback user ID:', userId);
+      logger.warn('⚠️  Cannot setup tunnel: User not authenticated');
+      logger.info('💡 Please authenticate first via /api/auth/start');
+      logger.info('💡 Tunnel will be automatically setup after authentication');
+      return; // Exit without setting up tunnel
     }
+
+    // Get authenticated user ID
+    const userId = this.authService.getUserId();
+    if (!userId) {
+      logger.error('❌ Cannot setup tunnel: No user ID available');
+      return;
+    }
+
+    logger.info('🔐 Setting up tunnel for authenticated user', { userId });
 
     // Initialize Cloudflared service
     this.cloudflared = new CloudflaredService({
