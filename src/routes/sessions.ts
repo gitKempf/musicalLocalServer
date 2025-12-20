@@ -162,7 +162,7 @@ sessionRoutes.post('/create', requireAuth, async (req, res) => {
         userId,
         sessionId,
         giteaToken: process.env.GITEA_TOKEN,
-        giteaUser: process.env.GITEA_USER || `user${userId}`,
+        giteaUser: process.env.GITEA_USERNAME || process.env.GITEA_USER || `user${userId}`,
         gitEmail: project.git_email || `user${userId}@musical.run`,
         gitName: project.git_name || `User ${userId}`,
       });

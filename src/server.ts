@@ -21,6 +21,7 @@ import { TunnelRegistrationService } from './services/TunnelRegistrationService'
 import { CloudflaredService } from './services/CloudflaredService';
 import { ContainerOrchestrator } from './services/ContainerOrchestrator';
 import { GiteaService } from './services/GiteaService';
+import { GiteaAutoSetupService } from './services/GiteaAutoSetupService';
 import { setupRoutes } from './routes';
 import { setupSocketHandlers } from './sockets';
 import { initializeSessionRoutes } from './routes/sessions';
@@ -131,10 +132,37 @@ class LocalServer {
       throw new Error('Docker is required but not accessible. Make sure Docker is running.');
     }
 
-    // Initialize Gitea Service (optional - if configured)
+    // Initialize Gitea Service (with auto-setup if not configured)
     const giteaUrl = process.env.GITEA_URL;
-    const giteaToken = process.env.GITEA_TOKEN;
-    const giteaUsername = process.env.GITEA_USERNAME;
+    let giteaToken = process.env.GITEA_TOKEN;
+    let giteaUsername = process.env.GITEA_USERNAME || process.env.GITEA_ADMIN_USER;
+    const giteaAdminPassword = process.env.GITEA_ADMIN_PASSWORD;
+    const autoSetupEnabled = process.env.AUTO_SETUP !== 'false';
+
+    // Try auto-setup if token is not provided and auto-setup is enabled
+    if (giteaUrl && (!giteaToken || !giteaUsername) && autoSetupEnabled) {
+      logger.info('🔧 Gitea token not configured, attempting auto-setup...');
+      
+      try {
+        const autoSetup = new GiteaAutoSetupService({
+          giteaUrl,
+          giteaContainer: process.env.GITEA_CONTAINER || 'musical-gitea',
+          adminUsername: giteaUsername || 'musical',
+          organization: process.env.GITEA_ORGANIZATION || 'musical',
+        });
+
+        // Pass the admin password from environment if provided
+        const credentials = await autoSetup.setup(giteaAdminPassword);
+        if (credentials) {
+          giteaToken = credentials.token;
+          giteaUsername = credentials.username;
+          logger.info('✅ Gitea auto-setup successful', { username: giteaUsername });
+        }
+      } catch (error: any) {
+        logger.warn('⚠️  Gitea auto-setup failed', { error: error.message });
+        logger.info('💡 You can manually configure GITEA_TOKEN in .env file');
+      }
+    }
 
     if (giteaUrl && giteaToken && giteaUsername) {
       try {

@@ -93,8 +93,11 @@ services:
 
       # Gitea connection
       - GITEA_URL=http://gitea:3000
+      - GITEA_CONTAINER=musical-gitea
       - GITEA_ADMIN_USER=${GITEA_ADMIN_USER:-musical}
       - GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-musical_gitea_pass}
+      - GITEA_TOKEN=${GITEA_TOKEN:-}
+      - GITEA_USERNAME=${GITEA_USERNAME:-musical}
 
       # Auto-setup
       - AUTO_SETUP=${AUTO_SETUP:-true}

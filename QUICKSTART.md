@@ -1,12 +1,48 @@
 # Musical.run Local Server - Quick Start Guide
 
-## Prerequisites
+## One-Command Installation
+
+Install and run the local server with a single command:
+
+```bash
+curl -fsSL https://musical.run/install.sh | bash
+```
+
+Or directly from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gitKempf/musicalLocalServer/main/install.sh | bash
+```
+
+This will automatically:
+- ✅ Check prerequisites (Docker, Git, etc.)
+- ✅ Clone the repository
+- ✅ Generate unique, secure credentials
+- ✅ Start PostgreSQL, Gitea, and the Local Server
+- ✅ Configure Gitea with admin user and API token
+- ✅ Display connection information
+
+### Custom Installation Options
+
+```bash
+# Install to a custom directory
+curl -fsSL https://musical.run/install.sh | bash -s -- --dir /custom/path
+
+# Use custom ports
+curl -fsSL https://musical.run/install.sh | bash -s -- --port 8100 --gitea-port 8101
+```
+
+---
+
+## Manual Installation (Alternative)
+
+### Prerequisites
 
 1. **Docker & Docker Compose** installed
 2. **Claude.ai Subscription** (required for Claude Code CLI)
 3. **Node.js 20+** (for running on host)
 
-## Step 1: Authenticate Claude Code CLI
+### Step 1: Authenticate Claude Code CLI
 
 Claude Code uses web-based OAuth authentication, not API keys.
 
@@ -36,7 +72,7 @@ If you see a response from Claude, authentication is working!
 
 ```bash
 cd local-server
-docker-compose up --build
+docker-compose up --build -d
 ```
 
 **What starts**:
@@ -45,7 +81,9 @@ docker-compose up --build
 - PostgreSQL database (port **17102**)
 - Gitea (port **17101**)
 
-## Step 3: Test the Server
+> **Note**: Gitea is automatically configured on first startup. No manual setup required!
+
+### Step 4: Test the Server
 
 ### Health Check
 ```bash

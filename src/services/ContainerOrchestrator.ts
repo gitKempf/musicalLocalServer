@@ -321,6 +321,26 @@ export class ContainerOrchestrator {
         git config --global http.sslVerify false
       `);
 
+      // Configure Git credentials for Gitea (if token provided)
+      if (options.giteaToken && options.giteaUser) {
+        // Extract host from Gitea URL (e.g., local-gitea:3000)
+        const giteaHost = this.giteaUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        
+        // Set up credential helper to store credentials
+        await this.execInContainer(container, `
+          git config --global credential.helper store &&
+          mkdir -p ~/.git-credentials &&
+          echo "http://${options.giteaUser}:${options.giteaToken}@${giteaHost}" > ~/.git-credentials
+        `);
+        
+        // Also configure URL rewriting to include credentials automatically
+        await this.execInContainer(container, `
+          git config --global url."http://${options.giteaUser}:${options.giteaToken}@${giteaHost}/".insteadOf "http://${giteaHost}/"
+        `);
+        
+        logger.info('✅ Git credentials configured for Gitea', { giteaUser: options.giteaUser });
+      }
+
       // Test Gitea connectivity
       const testCmd = `curl -s -o /dev/null -w "%{http_code}" ${this.giteaUrl}/api/v1/version || echo "000"`;
       const result = await this.execInContainer(container, testCmd);

@@ -44,7 +44,9 @@ services:
       - musical_keys:/root/.musical/keys
       - musical_data:/root/.musical/data
       - musical_logs:/root/.musical/logs
+      - musical_secrets:/root/.musical/secrets
       - ${HOME}/.musical/auth.json:/root/.musical/auth.json
+      - ${HOME}/.musical/secrets/gitea-credentials.json:/root/.musical/secrets/gitea-credentials.json:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - local-postgres
@@ -154,6 +156,8 @@ volumes:
   musical_data:
     driver: local
   musical_logs:
+    driver: local
+  musical_secrets:
     driver: local
   musical_claude_sessions:
     driver: local
