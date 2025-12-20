@@ -668,6 +668,39 @@ export class ContainerOrchestrator {
   }
 
   /**
+   * Remove a container (stop if running, then remove)
+   */
+  async removeContainer(containerId: string): Promise<void> {
+    try {
+      const container = this.docker.getContainer(containerId);
+      
+      // First try to stop the container
+      try {
+        await container.stop({ t: 5 }); // 5 second grace period
+        logger.info('⏸️  Container stopped before removal', { containerId });
+      } catch (stopError: any) {
+        // Ignore "container already stopped" or "not running" errors
+        if (stopError.statusCode !== 304 && stopError.statusCode !== 404) {
+          logger.debug('Container stop warning (may already be stopped)', { containerId, error: stopError.message });
+        }
+      }
+
+      // Remove the container
+      await container.remove({ force: true, v: true }); // force remove, also remove volumes
+
+      logger.info('🗑️  Container removed', { containerId });
+    } catch (error: any) {
+      // Ignore "container not found" errors
+      if (error.statusCode === 404) {
+        logger.debug('Container not found (already removed)', { containerId });
+        return;
+      }
+      logger.error('❌ Failed to remove container', { containerId, error: error.message });
+      throw error;
+    }
+  }
+
+  /**
    * Start a stopped container
    */
   async startContainer(containerId: string): Promise<void> {

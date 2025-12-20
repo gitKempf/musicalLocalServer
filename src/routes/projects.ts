@@ -8,19 +8,28 @@ import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../lib/logger';
 import ProjectService from '../services/ProjectService';
 import { GiteaService } from '../services/GiteaService';
+import { ContainerOrchestrator } from '../services/ContainerOrchestrator';
 import { requireAuth } from '../middleware/auth';
 
 export const projectRoutes = Router();
 
-// Gitea service will be injected via middleware
+// Services will be injected via middleware
 let giteaService: GiteaService | null = null;
+let containerOrchestrator: ContainerOrchestrator | null = null;
 
-export function initializeProjectRoutes(gitea: GiteaService | null) {
+export function initializeProjectRoutes(
+  gitea: GiteaService | null,
+  orchestrator?: ContainerOrchestrator | null
+) {
   giteaService = gitea;
+  containerOrchestrator = orchestrator || null;
   if (gitea) {
     logger.info('✅ Project routes initialized with GiteaService');
   } else {
     logger.warn('⚠️  Project routes initialized WITHOUT GiteaService (offline mode)');
+  }
+  if (orchestrator) {
+    logger.info('✅ Project routes initialized with ContainerOrchestrator');
   }
 }
 
@@ -237,21 +246,89 @@ projectRoutes.put('/:projectId', async (req, res) => {
 
 /**
  * DELETE /api/projects/:projectId
- * Delete project (soft delete)
+ * Delete project with full cleanup (container, Gitea repo, soft delete in DB)
  */
 projectRoutes.delete('/:projectId', async (req, res) => {
   try {
     const { projectId } = req.params;
     const userId = (req as any).user.userId;
 
-    logger.info('🗑️  Deleting project', { projectId, userId });
+    logger.info('🗑️  Deleting project with full cleanup', { projectId, userId });
 
+    // First, get the project to check for container and Gitea repo
+    const project = await ProjectService.getProject(projectId, userId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found or access denied',
+      });
+    }
+
+    const cleanupResults = {
+      containerRemoved: false,
+      giteaRepoDeleted: false,
+      projectDeleted: false,
+    };
+
+    // 1. Stop and remove Docker container if exists
+    if (project.container_id && containerOrchestrator) {
+      try {
+        logger.info('🐳 Removing container for project', { 
+          projectId, 
+          containerId: project.container_id 
+        });
+        await containerOrchestrator.removeContainer(project.container_id);
+        cleanupResults.containerRemoved = true;
+        logger.info('✅ Container removed successfully', { containerId: project.container_id });
+      } catch (containerError: any) {
+        logger.warn('⚠️  Failed to remove container (may already be removed)', { 
+          containerId: project.container_id,
+          error: containerError.message 
+        });
+        // Continue with deletion even if container removal fails
+      }
+    }
+
+    // 2. Delete Gitea repository if exists
+    if (project.gitea_repo_url && giteaService) {
+      try {
+        // Extract repo name from URL (format: http://gitea:3000/musical/repo-name.git)
+        const repoUrlMatch = project.gitea_repo_url.match(/\/([^\/]+)\.git$/);
+        const repoName = repoUrlMatch ? repoUrlMatch[1] : null;
+        
+        if (repoName) {
+          logger.info('📦 Deleting Gitea repository for project', { 
+            projectId, 
+            repoName,
+            repoUrl: project.gitea_repo_url
+          });
+          await giteaService.deleteRepository(repoName);
+          cleanupResults.giteaRepoDeleted = true;
+          logger.info('✅ Gitea repository deleted successfully', { repoName });
+        }
+      } catch (giteaError: any) {
+        logger.warn('⚠️  Failed to delete Gitea repository (may already be deleted)', { 
+          repoUrl: project.gitea_repo_url,
+          error: giteaError.message 
+        });
+        // Continue with deletion even if Gitea deletion fails
+      }
+    }
+
+    // 3. Soft delete project in database
     const deletedProject = await ProjectService.deleteProject(projectId, userId);
+    cleanupResults.projectDeleted = true;
+
+    logger.info('✅ Project deleted successfully with cleanup', { 
+      projectId: deletedProject.id,
+      cleanup: cleanupResults
+    });
 
     res.json({
       success: true,
       message: 'Project deleted successfully',
       projectId: deletedProject.id,
+      cleanup: cleanupResults,
     });
   } catch (error: any) {
     logger.error('❌ Failed to delete project', { error: error.message });

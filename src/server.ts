@@ -164,8 +164,8 @@ class LocalServer {
     // Initialize auth routes
     initializeAuthRoutes(this.authService);
 
-    // Initialize project routes with Gitea service
-    initializeProjectRoutes(this.giteaService);
+    // Initialize project routes with Gitea service and container orchestrator
+    initializeProjectRoutes(this.giteaService, this.containerOrchestrator);
 
     // Setup middleware
     this.setupMiddleware();
