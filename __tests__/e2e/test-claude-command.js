@@ -16,10 +16,11 @@ const USER_ID = '17';
 
 function generateToken() {
   const secret = process.env.JWT_SECRET || 'musical-run-secret-key';
+  const email = process.env.TEST_EMAIL || 'test@example.com';
   return jwt.sign(
     {
       userId: parseInt(USER_ID),
-      email: 'test@example.com',
+      email: email,
       jti: 'test-' + Date.now()
     },
     secret,

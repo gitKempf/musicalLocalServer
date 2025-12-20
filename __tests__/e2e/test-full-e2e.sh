@@ -14,11 +14,12 @@ echo ""
 
 # Generate token
 echo "🔑 Generating test token..."
+TEST_EMAIL="${TEST_EMAIL:-test@example.com}"
 TOKEN=$(docker exec musical-auth-service node -e "
 const jwt = require('jsonwebtoken');
 const secret = process.env.JWT_SECRET || 'musical-run-secret-key';
 const token = jwt.sign(
-  { userId: 17, email: 'test@example.com', jti: 'test-' + Date.now() },
+  { userId: 17, email: '${TEST_EMAIL}', jti: 'test-' + Date.now() },
   secret,
   { expiresIn: '1h' }
 );

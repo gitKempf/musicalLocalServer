@@ -15,11 +15,16 @@ const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://musical.run';
 const CLAUDE_AGENT_URL = process.env.CLAUDE_AGENT_URL || 'http://localhost:17110';
 const GITEA_URL = process.env.GITEA_URL || 'http://localhost:17101';
 
-// Test credentials
+// Test credentials - MUST be provided via environment variables
 const TEST_USER = {
-  email: process.env.TEST_EMAIL || 'test@example.com',
-  password: process.env.TEST_PASSWORD || 'PLACEHOLDER_PASSWORD'
+  email: process.env.TEST_EMAIL || '',
+  password: process.env.TEST_PASSWORD || ''
 };
+
+// Validate test credentials are provided
+if (!TEST_USER.email || !TEST_USER.password) {
+  console.warn('⚠️  TEST_EMAIL and TEST_PASSWORD environment variables must be set for E2E tests');
+}
 
 describe('Local Server E2E Tests - Complete Flow', () => {
   let authToken: string;

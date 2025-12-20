@@ -29,9 +29,11 @@ echo ""
 
 # Step 1: Get authentication token
 echo "Step 1: Getting authentication token..."
+TEST_EMAIL="${TEST_EMAIL:-test@example.com}"
+TEST_PASSWORD="${TEST_PASSWORD:-testpassword}"
 LOGIN_RESPONSE=$(curl -s -X POST "$AUTH_SERVICE_URL/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"test1234"}')
+  -d "{\"email\":\"${TEST_EMAIL}\",\"password\":\"${TEST_PASSWORD}\"}")
 
 ACCESS_TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.accessToken // empty')
 
