@@ -11,7 +11,7 @@ curl -fsSL https://musical.run/install.sh | bash
 Or directly from GitHub:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gitKempf/musicalLocalServer/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gitKempf/musicalLocalServer/master/install.sh | bash
 ```
 
 This will automatically:

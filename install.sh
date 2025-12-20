@@ -6,7 +6,7 @@
 #   curl -fsSL https://musical.run/install.sh | bash
 #
 # Or directly from GitHub:
-#   curl -fsSL https://raw.githubusercontent.com/gitKempf/musicalLocalServer/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/gitKempf/musicalLocalServer/master/install.sh | bash
 #
 # Or with custom options:
 #   curl -fsSL https://musical.run/install.sh | bash -s -- --port 17100
@@ -37,7 +37,7 @@ MUSICAL_PORT="${MUSICAL_PORT:-17100}"
 GITEA_PORT="${GITEA_PORT:-17101}"
 POSTGRES_PORT="${POSTGRES_PORT:-17102}"
 REPO_URL="${REPO_URL:-https://github.com/gitKempf/musicalLocalServer.git}"
-BRANCH="${BRANCH:-main}"
+BRANCH="${BRANCH:-master}"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
