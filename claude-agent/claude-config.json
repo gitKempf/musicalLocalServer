@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "git": {
+      "command": "node",
+      "args": ["/app/mcp-server-git.js"],
+      "env": {
+        "WORK_DIR": "/app/projects",
+        "GITEA_URL": "http://local-gitea:3000",
+        "GITEA_USER": "musical"
+      }
+    }
+  },
+  "autoCommit": {
+    "enabled": true,
+    "afterGeneration": true,
+    "pushToRemote": false
+  }
+}

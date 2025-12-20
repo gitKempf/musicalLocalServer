@@ -1,0 +1,23 @@
+{
+  "name": "musical-claude-agent",
+  "version": "1.0.0",
+  "description": "Claude Code CLI Agent - Session runner for Musical.run Local Server",
+  "main": "session-runner.js",
+  "scripts": {
+    "start": "node session-runner.js"
+  },
+  "keywords": [
+    "claude",
+    "agent",
+    "code-generation",
+    "musical"
+  ],
+  "author": "Musical.run Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

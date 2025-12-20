@@ -1,0 +1,167 @@
+# Musical.run Local Server - Complete Stack
+# This docker-compose file runs all services needed for local code generation
+
+version: '3.8'
+
+services:
+  # Main local server
+  musical-local-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: musical-local
+    restart: unless-stopped
+    ports:
+      - "17100:17100"  # Main API
+    environment:
+      - NODE_ENV=production
+      - PORT=17100
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLOUD_API_URL=${CLOUD_API_URL:-https://api.musical.run}
+      - CLOUD_REGISTRATION_ENABLED=${CLOUD_REGISTRATION_ENABLED:-false}
+      # AUTO_AUTH_ENABLED controls whether the server tries to authenticate on startup
+      # In Docker, this should be false because browser-based auth cannot work
+      # Users can authenticate via API after server is running
+      - AUTO_AUTH_ENABLED=${AUTO_AUTH_ENABLED:-false}
+      - MUSICAL_AUTH_EMAIL=${MUSICAL_AUTH_EMAIL}
+      - MUSICAL_AUTH_PASSWORD=${MUSICAL_AUTH_PASSWORD}
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-https://musical.run}
+      - TUNNEL_ENABLED=${TUNNEL_ENABLED:-true}
+      - TUNNEL_ROUTER_URL=${TUNNEL_ROUTER_URL:-https://musical.run}
+      - USER_ID=${USER_ID}
+      - CLAUDE_AGENT_URL=http://claude-agent:17110
+      - DB_HOST=local-postgres
+      - DB_PORT=5432
+      - DB_NAME=musical_local
+      - DB_USER=musical
+      - DB_PASSWORD=${LOCAL_DB_PASSWORD:-musical_local_pass}
+      # Gitea configuration (optional - for Git integration)
+      - GITEA_URL=http://local-gitea:3000
+      - GITEA_TOKEN=${GITEA_TOKEN}
+      - GITEA_USERNAME=${GITEA_USERNAME:-musical}
+      - GITEA_ORGANIZATION=${GITEA_ORGANIZATION}
+    volumes:
+      - musical_keys:/root/.musical/keys
+      - musical_data:/root/.musical/data
+      - musical_logs:/root/.musical/logs
+      - ${HOME}/.musical/auth.json:/root/.musical/auth.json
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - local-postgres
+      - claude-agent
+    networks:
+      - musical-local
+
+  # Claude Code CLI agent container
+  claude-agent:
+    build:
+      context: ./claude-agent
+      dockerfile: Dockerfile
+    container_name: musical-claude-agent
+    restart: unless-stopped
+    ports:
+      - "17110:17110"  # Claude agent API
+    environment:
+      - CLAUDE_AUTO_SHUTDOWN_MINUTES=${CLAUDE_AUTO_SHUTDOWN_MINUTES:-30}
+      - PORT=17110
+    volumes:
+      - musical_claude_sessions:/app/.claude-sessions
+      - musical_projects:/app/projects
+      - /tmp/activity:/tmp/activity
+      # Mount Claude Code authentication from host
+      # Run 'claude setup-token' on host first!
+      - ${HOME}/.config/claude-code:/root/.config/claude-code:ro
+    networks:
+      - musical-local
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "node.*session-runner"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Local Gitea instance
+  local-gitea:
+    image: gitea/gitea:latest
+    container_name: musical-gitea-local
+    restart: unless-stopped
+    ports:
+      - "17101:3000"
+      - "17022:22"
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=local-postgres:5432
+      - GITEA__database__NAME=gitea_local
+      - GITEA__database__USER=gitea
+      - GITEA__database__PASSWD=${GITEA_DB_PASSWORD:-gitea_pass}
+      - GITEA__server__DOMAIN=localhost
+      - GITEA__server__ROOT_URL=http://localhost:17101/
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY:-change_this_secret}
+    volumes:
+      - musical_gitea_data:/data
+    depends_on:
+      - local-postgres
+    networks:
+      - musical-local
+
+  # Local PostgreSQL database
+  local-postgres:
+    image: postgres:15-alpine
+    container_name: musical-postgres-local
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=musical_local
+      - POSTGRES_USER=musical
+      - POSTGRES_PASSWORD=${LOCAL_DB_PASSWORD:-musical_local_pass}
+    volumes:
+      - musical_postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "17102:5432"
+    networks:
+      - musical-local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U musical"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Cloudflare Tunnel (optional - for preview access)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: musical-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    volumes:
+      - musical_tunnel_config:/etc/cloudflared
+    networks:
+      - musical-local
+    profiles:
+      - with-tunnel  # Only start if needed
+
+networks:
+  musical-local:
+    driver: bridge
+
+volumes:
+  musical_keys:
+    driver: local
+  musical_data:
+    driver: local
+  musical_logs:
+    driver: local
+  musical_claude_sessions:
+    driver: local
+  musical_projects:
+    driver: local
+  musical_gitea_data:
+    driver: local
+  musical_postgres_data:
+    driver: local
+  musical_tunnel_config:
+    driver: local

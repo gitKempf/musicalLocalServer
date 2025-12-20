@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Musical.run Terminal</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background: #1e1e1e;
+            overflow: hidden;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+        }
+        #terminal {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            padding: 8px;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #0dbc79;
+            font-size: 16px;
+            text-align: center;
+        }
+        #loading.hidden {
+            display: none;
+        }
+        .spinner {
+            border: 3px solid #333;
+            border-top: 3px solid #0dbc79;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div class="spinner"></div>
+        <div>Connecting to terminal...</div>
+    </div>
+    <div id="terminal"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+    <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+
+    <script>
+        // Parse URL parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const serverUrl = urlParams.get('serverUrl') || 'http://localhost:17100';
+        const containerId = urlParams.get('containerId') || 'musical-claude-agent';
+
+        // Debug logging
+        console.log('🔍 Terminal parameters:', {
+            serverUrl,
+            containerId,
+            fullUrl: window.location.href
+        });
+
+        // Initialize terminal
+        const term = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+            theme: {
+                background: '#1e1e1e',
+                foreground: '#d4d4d4',
+                cursor: '#ffffff',
+                cursorAccent: '#1e1e1e',
+                selectionBackground: '#264f78',
+                selectionForeground: '#ffffff',
+                black: '#000000',
+                red: '#cd3131',
+                green: '#0dbc79',
+                yellow: '#e5e510',
+                blue: '#2472c8',
+                magenta: '#bc3fbc',
+                cyan: '#11a8cd',
+                white: '#e5e5e5',
+                brightBlack: '#666666',
+                brightRed: '#f14c4c',
+                brightGreen: '#23d18b',
+                brightYellow: '#f5f543',
+                brightBlue: '#3b8eea',
+                brightMagenta: '#d670d6',
+                brightCyan: '#29b8db',
+                brightWhite: '#ffffff'
+            },
+            scrollback: 10000,
+            allowProposedApi: true,
+        });
+
+        // Load addons
+        const fitAddon = new FitAddon.FitAddon();
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(webLinksAddon);
+
+        // Open terminal
+        term.open(document.getElementById('terminal'));
+        fitAddon.fit();
+
+        // Welcome message
+        term.writeln('\x1b[1;32m🎵 Musical.run Terminal\x1b[0m');
+        term.writeln('\x1b[90mConnecting to ' + containerId + '...\x1b[0m');
+        term.writeln('');
+
+        // Connect to Socket.IO
+        const socket = io(serverUrl, {
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionAttempts: 5
+        });
+
+        let sessionId = null;
+        let connected = false;
+
+        socket.on('connect', () => {
+            console.log('✅ Socket.IO connected:', socket.id);
+
+            // Create terminal session
+            console.log('📡 Creating terminal session:', {
+                containerId,
+                rows: term.rows,
+                cols: term.cols
+            });
+
+            socket.emit('terminal:create', {
+                containerId: containerId,
+                sessionId: containerId, // Use containerId as sessionId for now
+                rows: term.rows,
+                cols: term.cols
+            }, (response) => {
+                console.log('📥 Terminal create response:', response);
+                if (response.success) {
+                    sessionId = response.sessionId;
+                    connected = true;
+
+                    // Hide loading
+                    document.getElementById('loading').classList.add('hidden');
+
+                    // Notify React Native
+                    if (window.ReactNativeWebView) {
+                        window.ReactNativeWebView.postMessage(JSON.stringify({
+                            type: 'terminal:ready',
+                            sessionId: sessionId
+                        }));
+                    }
+
+                    term.writeln('\x1b[32m✓ Connected to container\x1b[0m');
+                    term.writeln('');
+                } else {
+                    term.writeln('\x1b[31m✗ Failed to create terminal session\x1b[0m');
+                    term.writeln('\x1b[31m  ' + response.error + '\x1b[0m');
+
+                    if (window.ReactNativeWebView) {
+                        window.ReactNativeWebView.postMessage(JSON.stringify({
+                            type: 'terminal:error',
+                            error: response.error
+                        }));
+                    }
+                }
+            });
+        });
+
+        socket.on('connect_error', (error) => {
+            console.error('❌ Socket.IO connection error:', error);
+            console.error('Error details:', {
+                message: error.message,
+                description: error.description,
+                context: error.context
+            });
+            term.writeln('\x1b[31m✗ Connection error: ' + error.message + '\x1b[0m');
+            
+            // Log for React Native WebView
+            if (window.ReactNativeWebView) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'terminal:error',
+                    error: error.message
+                }));
+            }
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Socket.IO disconnected');
+            connected = false;
+            term.writeln('\r\n\x1b[33m⚠ Disconnected from server\x1b[0m');
+
+            if (window.ReactNativeWebView) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'terminal:disconnected'
+                }));
+            }
+        });
+
+        // Handle terminal data from server
+        socket.on('terminal:data', (data) => {
+            term.write(data);
+        });
+
+        // Handle terminal close
+        socket.on('terminal:close', () => {
+            term.writeln('\r\n\x1b[31m✗ Terminal session closed\x1b[0m');
+            connected = false;
+
+            if (window.ReactNativeWebView) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'terminal:closed'
+                }));
+            }
+        });
+
+        // Handle errors
+        socket.on('terminal:error', (error) => {
+            term.writeln('\r\n\x1b[31m✗ Error: ' + error.message + '\x1b[0m');
+
+            if (window.ReactNativeWebView) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'terminal:error',
+                    error: error.message
+                }));
+            }
+        });
+
+        // Handle user input
+        term.onData((data) => {
+            if (connected && sessionId) {
+                socket.emit('terminal:input', data);
+            }
+        });
+
+        // Handle terminal resize
+        term.onResize(({ rows, cols }) => {
+            if (connected && sessionId) {
+                socket.emit('terminal:resize', { rows, cols });
+            }
+        });
+
+        // Handle window resize
+        let resizeTimeout;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                fitAddon.fit();
+            }, 100);
+        });
+
+        // Initial fit
+        setTimeout(() => {
+            fitAddon.fit();
+        }, 100);
+
+        // Handle messages from React Native
+        window.addEventListener('message', (event) => {
+            try {
+                const message = JSON.parse(event.data);
+
+                if (message.type === 'terminal:input') {
+                    if (connected && sessionId) {
+                        socket.emit('terminal:input', message.data);
+                    }
+                } else if (message.type === 'terminal:clear') {
+                    term.clear();
+                } else if (message.type === 'terminal:fit') {
+                    fitAddon.fit();
+                }
+            } catch (err) {
+                console.error('Error handling message:', err);
+            }
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (connected && sessionId) {
+                socket.emit('terminal:close');
+            }
+            socket.disconnect();
+        });
+    </script>
+</body>
+</html>
