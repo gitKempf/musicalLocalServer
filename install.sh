@@ -430,6 +430,34 @@ configure_gitea() {
     local admin_password="$GITEA_ADMIN_PASSWORD"
     local secrets_dir="$HOME/.musical/secrets"
     
+    # First, ensure Gitea is properly installed (set INSTALL_LOCK)
+    log_info "Ensuring Gitea is properly configured..."
+    docker exec "$gitea_container" sh -c "
+        if grep -q 'INSTALL_LOCK = false' /data/gitea/conf/app.ini 2>/dev/null; then
+            sed -i 's/INSTALL_LOCK = false/INSTALL_LOCK = true/' /data/gitea/conf/app.ini
+            echo 'Fixed INSTALL_LOCK'
+        fi
+        if grep -q '^SECRET_KEY = $' /data/gitea/conf/app.ini 2>/dev/null; then
+            SECRET=\$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 64)
+            sed -i \"s/^SECRET_KEY = $/SECRET_KEY = \$SECRET/\" /data/gitea/conf/app.ini
+            echo 'Fixed SECRET_KEY'
+        fi
+    " 2>/dev/null || true
+    
+    # Restart Gitea if we made changes
+    docker restart "$gitea_container" >/dev/null 2>&1 || true
+    
+    # Wait for Gitea to be ready again
+    local max_attempts=30
+    local attempt=0
+    while [ $attempt -lt $max_attempts ]; do
+        if curl -s "http://localhost:${GITEA_PORT}/api/v1/version" >/dev/null 2>&1; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    
     # Check if user already exists
     local user_exists=$(docker exec -u git "$gitea_container" sh -c "gitea admin user list 2>&1 | grep -w '$admin_user' | wc -l" 2>/dev/null || echo "0")
     
@@ -478,6 +506,7 @@ EOF
             echo "" >> "$INSTALL_DIR/.env"
             echo "# Gitea API Token (auto-generated)" >> "$INSTALL_DIR/.env"
             echo "GITEA_TOKEN=$token" >> "$INSTALL_DIR/.env"
+            echo "GITEA_USERNAME=$admin_user" >> "$INSTALL_DIR/.env"
         fi
         
         log_success "Gitea credentials saved"
