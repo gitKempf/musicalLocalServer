@@ -120,6 +120,28 @@ export class AuthService {
   }
 
   /**
+   * Set token directly (for external authentication like API-based auth)
+   * This allows the auth routes to inject tokens received from external sources
+   */
+  async setToken(tokenData: AuthTokenData): Promise<void> {
+    logger.info('🔑 Setting authentication token', { userId: tokenData.userId, email: tokenData.email });
+    
+    this.tokenData = tokenData;
+    await this.saveToken(tokenData);
+    
+    // Trigger onAuthenticated callback (e.g., to setup tunnel)
+    if (this.onAuthenticatedCallback) {
+      try {
+        await this.onAuthenticatedCallback(tokenData);
+      } catch (error: any) {
+        logger.warn('⚠️  onAuthenticated callback failed', { error: error.message });
+      }
+    }
+    
+    logger.info('✅ Authentication token set successfully');
+  }
+
+  /**
    * Authenticate with Musical.run using CLI prompts or environment variables
    * Prompts user for email/password directly in terminal, or uses env vars
    */
@@ -225,15 +247,148 @@ export class AuthService {
   }
 
   /**
+   * Authenticate using device code flow
+   * This is the recommended flow for Docker/remote environments:
+   * 1. Server requests a device code from Musical.run
+   * 2. User opens the link in their browser
+   * 3. User authenticates and clicks "Authorize Server"
+   * 4. Server polls for the authorization result
+   */
+  async authenticateDeviceCode(): Promise<AuthTokenData> {
+    logger.info('🔑 Device Code Authentication Flow');
+    logger.info('');
+
+    try {
+      // Step 1: Request device code from Musical.run
+      const serverName = process.env.SERVER_NAME || 'Local Server';
+      const response = await axios.post(
+        `${this.authServiceUrl}/api/auth/device/code`,
+        { serverName },
+        { timeout: 10000 }
+      );
+
+      if (!response.data.success) {
+        throw new Error(response.data.error || 'Failed to get device code');
+      }
+
+      const { deviceCode, userCode, verificationUrl, expiresIn, interval } = response.data;
+
+      // Display instructions to user
+      logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      logger.info('');
+      logger.info('  🔐 To authorize this server, visit:');
+      logger.info('');
+      logger.info(`  ${verificationUrl}`);
+      logger.info('');
+      logger.info(`  Your code: ${userCode}`);
+      logger.info('');
+      logger.info(`  This code expires in ${Math.floor(expiresIn / 60)} minutes.`);
+      logger.info('');
+      logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      logger.info('');
+      logger.info('⏳ Waiting for authorization...');
+
+      // Step 2: Poll for authorization
+      const pollInterval = (interval || 5) * 1000;
+      const maxPollTime = expiresIn * 1000;
+      const startTime = Date.now();
+
+      while (Date.now() - startTime < maxPollTime) {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+
+        try {
+          const statusResponse = await axios.get(
+            `${this.authServiceUrl}/api/auth/device/status/${deviceCode}`,
+            { timeout: 10000 }
+          );
+
+          if (statusResponse.data.status === 'authorized') {
+            // Success!
+            const tokenData: AuthTokenData = {
+              userId: statusResponse.data.userId.toString(),
+              accessToken: statusResponse.data.accessToken,
+              refreshToken: statusResponse.data.refreshToken,
+              expiresAt: statusResponse.data.expiresAt || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              email: statusResponse.data.email,
+              fullName: statusResponse.data.fullName || statusResponse.data.email,
+            };
+
+            // Save token
+            await this.saveToken(tokenData);
+            this.tokenData = tokenData;
+
+            logger.info('');
+            logger.info('✅ Authentication successful!', {
+              userId: tokenData.userId,
+              email: tokenData.email,
+            });
+
+            // Trigger onAuthenticated callback (e.g., to setup tunnel)
+            if (this.onAuthenticatedCallback) {
+              try {
+                await this.onAuthenticatedCallback(tokenData);
+              } catch (error: any) {
+                logger.warn('⚠️  onAuthenticated callback failed', { error: error.message });
+              }
+            }
+
+            return tokenData;
+          }
+
+          if (statusResponse.data.status === 'pending') {
+            // Still waiting, continue polling
+            continue;
+          }
+
+          // Any other status is an error
+          throw new Error(statusResponse.data.error || 'Authorization failed');
+
+        } catch (error: any) {
+          if (error.response?.status === 403) {
+            throw new Error('Authorization denied by user');
+          }
+          if (error.response?.status === 404 || error.response?.status === 410) {
+            throw new Error('Device code expired');
+          }
+          // For other errors, continue polling
+          logger.debug('Poll error, retrying...', { error: error.message });
+        }
+      }
+
+      throw new Error('Authorization timeout - please try again');
+
+    } catch (error: any) {
+      logger.error('❌ Device code authentication failed', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
    * Authenticate with Musical.run
    * Opens browser for user to login, waits for callback
    */
-  async authenticate(options: { openBrowser?: boolean; useCLI?: boolean } = {}): Promise<AuthTokenData> {
-    const { openBrowser = true, useCLI = false } = options;
+  async authenticate(options: { openBrowser?: boolean; useCLI?: boolean; useDeviceCode?: boolean } = {}): Promise<AuthTokenData> {
+    const { openBrowser = true, useCLI = false, useDeviceCode } = options;
 
-    // Use CLI authentication if requested or if in Docker/non-interactive environment
-    if (useCLI || process.env.DOCKER_CONTAINER === 'true' || !process.stdout.isTTY) {
+    // Determine which auth method to use
+    const isDocker = process.env.DOCKER_CONTAINER === 'true';
+    const isNonInteractive = !process.stdout.isTTY;
+    
+    // Use device code flow for Docker/remote environments (recommended)
+    // It shows a link the user can open in their browser
+    if (useDeviceCode === true || (useDeviceCode !== false && isDocker)) {
+      return this.authenticateDeviceCode();
+    }
+
+    // Use CLI authentication if explicitly requested or if env vars are set
+    const hasEnvCredentials = process.env.MUSICAL_AUTH_EMAIL && process.env.MUSICAL_AUTH_PASSWORD;
+    if (useCLI || hasEnvCredentials) {
       return this.authenticateCLI();
+    }
+
+    // For Docker without device code, use device code anyway (best UX)
+    if (isDocker || isNonInteractive) {
+      return this.authenticateDeviceCode();
     }
 
     logger.info('🌐 Starting authentication flow...');

@@ -70,7 +70,8 @@ export class CloudflaredService extends EventEmitter {
         logger.debug('Cloudflared stdout:', { output });
 
         // Look for tunnel URL pattern: https://*.trycloudflare.com
-        const urlMatch = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        // URL must start with alphanumeric (not hyphen) to be a valid domain
+        const urlMatch = output.match(/https:\/\/[a-z0-9][a-z0-9-]*\.trycloudflare\.com/);
         if (urlMatch && !urlFound) {
           urlFound = true;
           this.tunnelUrl = urlMatch[0];
@@ -91,7 +92,8 @@ export class CloudflaredService extends EventEmitter {
         const output = data.toString();
 
         // Also check stderr for URL (cloudflared sometimes logs there)
-        const urlMatch = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        // URL must start with alphanumeric (not hyphen) to be a valid domain
+        const urlMatch = output.match(/https:\/\/[a-z0-9][a-z0-9-]*\.trycloudflare\.com/);
         if (urlMatch && !urlFound) {
           urlFound = true;
           this.tunnelUrl = urlMatch[0];

@@ -275,7 +275,16 @@
         // Handle messages from React Native
         window.addEventListener('message', (event) => {
             try {
-                const message = JSON.parse(event.data);
+                // Handle both string and object messages
+                let message;
+                if (typeof event.data === 'string') {
+                    message = JSON.parse(event.data);
+                } else if (typeof event.data === 'object' && event.data !== null) {
+                    message = event.data;
+                } else {
+                    // Ignore non-object, non-string messages (e.g., from browser extensions)
+                    return;
+                }
 
                 if (message.type === 'terminal:input') {
                     if (connected && sessionId) {
@@ -287,7 +296,10 @@
                     fitAddon.fit();
                 }
             } catch (err) {
-                console.error('Error handling message:', err);
+                // Only log errors for actual terminal messages, not browser noise
+                if (typeof event.data === 'string' && event.data.includes('terminal')) {
+                    console.error('Error handling message:', err);
+                }
             }
         });
 

@@ -223,11 +223,12 @@ sessionRoutes.post('/create', requireAuth, async (req, res) => {
 
     // 5. Create session record in database
     await query(
-      `INSERT INTO sessions (id, project_id, session_path, status, container_id, ssh_port)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO sessions (id, project_id, user_id, session_path, status, container_id, ssh_port)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         sessionId,
         projectId,
+        userId,
         '/app', // Default workspace path in container
         'active',
         containerInfo.containerId,

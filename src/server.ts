@@ -14,6 +14,7 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 import { logger } from './lib/logger';
 import { encryptionService } from './lib/EncryptionService';
+import { initializeDatabase } from './lib/database';
 import { AuthService } from './services/AuthService';
 import { CloudRegistrationService } from './services/CloudRegistrationService';
 import { ClaudeSessionManager } from './services/ClaudeSessionManager';
@@ -87,6 +88,10 @@ class LocalServer {
 
   async initialize() {
     logger.info('🎵 Initializing Musical.run Local Server...');
+
+    // Initialize database schema (creates tables if they don't exist)
+    await initializeDatabase();
+    logger.info('🗄️  Database initialized');
 
     // Initialize encryption
     await encryptionService.initialize();
