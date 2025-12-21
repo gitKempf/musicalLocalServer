@@ -7,6 +7,7 @@ import { sessionRoutes } from './sessions';
 import { projectRoutes } from './projects';
 import { statusRoutes } from './status';
 import { authRoutes } from './auth';
+import { servicesRoutes } from './services';
 import terminalRoutes from './terminal';
 
 export function setupRoutes(app: Application): void {
@@ -15,6 +16,7 @@ export function setupRoutes(app: Application): void {
   app.use('/api/projects', projectRoutes);
   app.use('/api/status', statusRoutes);
   app.use('/api/auth', authRoutes);
+  app.use('/api/services', servicesRoutes);
   app.use('/api/terminal', terminalRoutes);
 
   // Root endpoint
@@ -28,6 +30,7 @@ export function setupRoutes(app: Application): void {
         auth: '/api/auth',
         sessions: '/api/sessions',
         projects: '/api/projects',
+        services: '/api/services',
         status: '/api/status',
         terminal: '/api/terminal',
       },

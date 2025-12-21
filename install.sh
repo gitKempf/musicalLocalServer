@@ -553,6 +553,12 @@ print_success() {
     local health=$(curl -s "http://localhost:${MUSICAL_PORT}/health" 2>/dev/null)
     local tunnel_url=$(echo "$health" | grep -o '"tunnelUrl":"[^"]*"' | cut -d'"' -f4)
     
+    # Start device authentication
+    log_info "Starting device authentication..."
+    local auth_response=$(curl -s -X POST "http://localhost:${MUSICAL_PORT}/api/auth/device" 2>/dev/null)
+    local verification_url=$(echo "$auth_response" | grep -o '"verificationUrl":"[^"]*"' | cut -d'"' -f4)
+    local user_code=$(echo "$auth_response" | grep -o '"userCode":"[^"]*"' | cut -d'"' -f4)
+    
     echo -e "${GREEN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║                                                              ║"
@@ -560,6 +566,22 @@ print_success() {
     echo "║                                                              ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
+    
+    echo -e "${BOLD}${YELLOW}━━━ IMPORTANT: Authenticate Your Server ━━━${NC}"
+    echo ""
+    if [ -n "$verification_url" ]; then
+        echo -e "  ${BOLD}Step 1:${NC} Open this URL in your browser:"
+        echo -e "  ${CYAN}${BOLD}$verification_url${NC}"
+        echo ""
+        echo -e "  ${BOLD}Step 2:${NC} Enter this code when prompted:"
+        echo -e "  ${CYAN}${BOLD}$user_code${NC}"
+        echo ""
+        echo -e "  ${BOLD}Step 3:${NC} Click 'Authorize' to connect your server"
+        echo ""
+    else
+        echo -e "  Visit ${CYAN}https://musical.run${NC} and connect your server"
+        echo ""
+    fi
     
     echo -e "${BOLD}Service URLs:${NC}"
     echo -e "  Local Server:  ${CYAN}http://localhost:${MUSICAL_PORT}${NC}"
@@ -582,10 +604,11 @@ print_success() {
     echo -e "  Backup:    ${CYAN}$HOME/.musical/secrets/install-credentials.json${NC}"
     echo ""
     
-    echo -e "${BOLD}Next Steps:${NC}"
-    echo -e "  1. Open ${CYAN}https://musical.run${NC} in your browser"
-    echo -e "  2. Login or create an account"
-    echo -e "  3. The frontend will automatically connect to your local server"
+    echo -e "${BOLD}After Authentication:${NC}"
+    echo -e "  The server will automatically:"
+    echo -e "  • Start the Cloudflare tunnel"
+    echo -e "  • Register with Musical.run"
+    echo -e "  • Appear in your server list at ${CYAN}https://musical.run/home${NC}"
     echo ""
     
     echo -e "${BOLD}Commands:${NC}"
