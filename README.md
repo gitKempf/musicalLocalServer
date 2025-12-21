@@ -18,6 +18,28 @@ cd musical-backend/local-server
 ./install.sh
 ```
 
+### Multi-Server Installation
+
+Run multiple isolated Musical servers on the same machine (e.g., home and work projects):
+
+```bash
+# First installation (home)
+./install-instance.sh --instance home --port 17100
+
+# Second installation (work)  
+./install-instance.sh --instance work --port 18100
+
+# Third installation (office)
+./install-instance.sh --instance office --port 19100
+```
+
+Each instance is completely isolated with its own:
+- Docker network (`musical-network-<instance>`)
+- Containers (`musical-local-<instance>`, `musical-postgres-<instance>`, etc.)
+- Volumes (data persisted separately)
+- Encryption keys
+- Port assignments
+
 ### Manual Installation
 
 **Requirements:**
@@ -43,7 +65,36 @@ docker compose up -d
 curl http://localhost:17100/health
 ```
 
-## CLI Commands
+## Instance Management
+
+Use the `musical` command to manage multiple instances:
+
+```bash
+# List all instances
+musical list
+
+# Show status of an instance
+musical status home
+
+# Start/stop/restart
+musical start work
+musical stop home
+musical restart office
+
+# View logs
+musical logs home              # Local server logs
+musical logs home postgres     # PostgreSQL logs
+musical logs home gitea        # Gitea logs
+musical logs home claude       # Claude agent logs
+
+# Shell into container
+musical shell home
+
+# Uninstall an instance (removes all data)
+musical uninstall old-instance
+```
+
+## CLI Commands (Legacy)
 
 After installation, use the `musical-server` command:
 

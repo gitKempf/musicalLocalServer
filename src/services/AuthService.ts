@@ -339,35 +339,39 @@ export class AuthService {
    * Verify token is valid
    */
   async verifyToken(): Promise<boolean> {
-    if (!this.tokenData?.accessToken) {
-      return false;
-    }
+    // If we have an access token, verify it
+    if (this.tokenData?.accessToken) {
+      try {
+        const response = await axios.get(
+          `${this.authServiceUrl}/api/auth/verify`,
+          {
+            headers: {
+              Authorization: `Bearer ${this.tokenData.accessToken}`,
+            },
+            timeout: 10000,
+          }
+        );
 
-    try {
-      const response = await axios.get(
-        `${this.authServiceUrl}/api/auth/verify`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.tokenData.accessToken}`,
-          },
-          timeout: 10000,
-        }
-      );
-
-      return response.data.success === true;
-    } catch (error: any) {
-      // Try to refresh token if verification fails
-      if (this.tokenData?.refreshToken) {
-        try {
-          await this.refreshAccessToken();
+        if (response.data.success === true) {
           return true;
-        } catch {
-          return false;
         }
+      } catch (error: any) {
+        // Access token verification failed, try refresh
+        logger.debug('Access token verification failed, trying refresh');
       }
-
-      return false;
     }
+
+    // If we have a refresh token, try to get a new access token
+    if (this.tokenData?.refreshToken) {
+      try {
+        await this.refreshAccessToken();
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    return false;
   }
 
   /**

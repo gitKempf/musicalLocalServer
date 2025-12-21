@@ -16,6 +16,8 @@ import { encryptionService } from '../lib/EncryptionService';
 export interface TunnelConfig {
   tunnelRouterUrl: string;
   userId: string;
+  serverId?: string;       // Unique identifier for this server instance
+  serverName?: string;     // Human-readable name (e.g., "Home Server")
   serverType: 'local' | 'cloud';
   heartbeatIntervalMs?: number;
 }
@@ -26,12 +28,17 @@ export class TunnelRegistrationService {
   private tunnelUrl: string | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private registered: boolean = false;
+  private serverId: string;
 
   constructor(config: TunnelConfig) {
     this.config = {
       heartbeatIntervalMs: 30000, // 30 seconds default
       ...config,
     };
+    
+    // Generate a unique server ID if not provided
+    // Uses a combination of machine-specific info to be consistent across restarts
+    this.serverId = config.serverId || this.generateServerId();
 
     this.client = axios.create({
       baseURL: config.tunnelRouterUrl,
@@ -48,6 +55,23 @@ export class TunnelRegistrationService {
   }
 
   /**
+   * Generate a unique server ID
+   * Uses encryption public key fingerprint for consistency across restarts
+   */
+  private generateServerId(): string {
+    const pubKey = encryptionService.getPublicKey();
+    // Use first 12 chars of public key as server ID
+    return `server_${pubKey.substring(0, 12)}`;
+  }
+
+  /**
+   * Get this server's unique ID
+   */
+  getServerId(): string {
+    return this.serverId;
+  }
+
+  /**
    * Register tunnel with router
    */
   async register(tunnelUrl: string): Promise<void> {
@@ -55,11 +79,15 @@ export class TunnelRegistrationService {
       logger.info('🔌 Registering tunnel with router', {
         tunnelUrl,
         userId: this.config.userId,
+        serverId: this.serverId,
+        serverName: this.config.serverName,
         serverType: this.config.serverType,
       });
 
       const response = await this.client.post('/api/tunnel/register', {
         userId: this.config.userId,
+        serverId: this.serverId,
+        serverName: this.config.serverName || `Local Server (${this.serverId.substring(0, 8)})`,
         tunnelUrl,
         encryptionPubkey: encryptionService.getPublicKey(),
         serverType: this.config.serverType,
@@ -70,6 +98,7 @@ export class TunnelRegistrationService {
         this.registered = true;
         logger.info('✅ Tunnel registered successfully', {
           userId: this.config.userId,
+          serverId: this.serverId,
           tunnelUrl: tunnelUrl.substring(0, 30) + '...',
         });
 
@@ -82,6 +111,7 @@ export class TunnelRegistrationService {
       logger.error('❌ Failed to register tunnel', {
         error: error instanceof Error ? error.message : String(error),
         userId: this.config.userId,
+        serverId: this.serverId,
       });
       throw error;
     }
@@ -98,6 +128,7 @@ export class TunnelRegistrationService {
     try {
       logger.info('🔌 Unregistering tunnel from router', {
         userId: this.config.userId,
+        serverId: this.serverId,
       });
 
       // Stop heartbeat first
@@ -105,6 +136,7 @@ export class TunnelRegistrationService {
 
       const response = await this.client.post('/api/tunnel/unregister', {
         userId: this.config.userId,
+        serverId: this.serverId,
       });
 
       if (response.data.success) {
@@ -165,9 +197,10 @@ export class TunnelRegistrationService {
     try {
       await this.client.post('/api/tunnel/heartbeat', {
         userId: this.config.userId,
+        serverId: this.serverId,
       });
 
-      logger.debug('💓 Heartbeat sent', { userId: this.config.userId });
+      logger.debug('💓 Heartbeat sent', { userId: this.config.userId, serverId: this.serverId });
     } catch (error) {
       // Log but don't throw - heartbeat failures shouldn't crash the server
       logger.warn('⚠️  Heartbeat request failed', {
@@ -181,7 +214,7 @@ export class TunnelRegistrationService {
    */
   async getStatus(): Promise<any> {
     try {
-      const response = await this.client.get(`/api/tunnel/status/${this.config.userId}`);
+      const response = await this.client.get(`/api/tunnel/status/${this.config.userId}/${this.serverId}`);
       return response.data;
     } catch (error) {
       logger.error('❌ Failed to get tunnel status', {
