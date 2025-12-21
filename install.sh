@@ -587,32 +587,12 @@ print_success() {
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     
-    echo -e "${BOLD}${YELLOW}━━━ IMPORTANT: Authenticate Your Server ━━━${NC}"
-    echo ""
-    if [ -n "$verification_url" ]; then
-        echo -e "  ${BOLD}Step 1:${NC} Open this URL in your browser:"
-        echo -e "  ${CYAN}${BOLD}$verification_url${NC}"
-        echo ""
-        echo -e "  ${BOLD}Step 2:${NC} Enter this code when prompted:"
-        echo -e "  ${CYAN}${BOLD}$user_code${NC}"
-        echo ""
-        echo -e "  ${BOLD}Step 3:${NC} Click 'Authorize' to connect your server"
-        echo ""
-    else
-        echo -e "  Visit ${CYAN}https://musical.run${NC} and connect your server"
-        echo ""
-    fi
-    
     echo -e "${BOLD}Service URLs:${NC}"
     echo -e "  Local Server:  ${CYAN}http://localhost:${MUSICAL_PORT}${NC}"
     echo -e "  Gitea:         ${CYAN}http://localhost:${GITEA_PORT}${NC}"
     if [ -n "$tunnel_url" ]; then
         echo -e "  Tunnel URL:    ${CYAN}$tunnel_url${NC}"
     fi
-    echo ""
-    
-    echo -e "${BOLD}Health Check:${NC}"
-    echo -e "  ${CYAN}curl http://localhost:${MUSICAL_PORT}/health${NC}"
     echo ""
     
     echo -e "${BOLD}Installation Directory:${NC}"
@@ -622,13 +602,6 @@ print_success() {
     echo -e "${BOLD}Credentials:${NC}"
     echo -e "  Stored in: ${CYAN}$INSTALL_DIR/.env${NC}"
     echo -e "  Backup:    ${CYAN}$HOME/.musical/secrets/install-credentials.json${NC}"
-    echo ""
-    
-    echo -e "${BOLD}After Authentication:${NC}"
-    echo -e "  The server will automatically:"
-    echo -e "  • Start the Cloudflare tunnel"
-    echo -e "  • Register with Musical.run"
-    echo -e "  • Appear in your server list at ${CYAN}https://musical.run/home${NC}"
     echo ""
     
     echo -e "${BOLD}Commands:${NC}"
@@ -641,6 +614,25 @@ print_success() {
     echo -e "${YELLOW}⚠️  Security Note:${NC}"
     echo -e "  Your installation uses unique, randomly generated credentials."
     echo -e "  Keep your .env file secure and do not share it."
+    echo ""
+    
+    # Authentication instructions at the very end so user sees them
+    echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${YELLOW}  🔑  IMPORTANT: Authenticate Your Server  🔑${NC}"
+    echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    if [ -n "$verification_url" ]; then
+        echo -e "  ${BOLD}Step 1:${NC} Open this URL in your browser:"
+        echo ""
+        echo -e "    ${CYAN}${BOLD}$verification_url${NC}"
+        echo ""
+        echo -e "  ${BOLD}Step 2:${NC} Click ${GREEN}'Authorize'${NC} to connect your server"
+        echo ""
+        echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    else
+        echo -e "  Visit ${CYAN}https://musical.run${NC} and connect your server"
+        echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    fi
     echo ""
 }
 
