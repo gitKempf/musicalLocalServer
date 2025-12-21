@@ -219,11 +219,31 @@ setup_repository() {
         
         # Check if it's a valid installation
         if [ -f "$INSTALL_DIR/docker-compose.yml" ] || [ -f "$INSTALL_DIR/docker-compose.user.yml" ]; then
-            log_info "Existing installation found. Updating..."
+            log_info "Existing installation found. Cleaning up..."
             cd "$INSTALL_DIR"
+            
+            # Stop existing containers
+            docker compose -f docker-compose.user.yml down 2>/dev/null || true
+            docker compose down 2>/dev/null || true
+            
+            # Get project name for volume cleanup
+            local project_name=$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
+            
+            # Remove old volumes to ensure fresh database with new credentials
+            log_info "Removing old data volumes for clean install..."
+            docker volume rm "${project_name}_postgres_data" 2>/dev/null || true
+            docker volume rm "${project_name}_gitea_data" 2>/dev/null || true
+            docker volume rm "${project_name}_musical_data" 2>/dev/null || true
+            docker volume rm "${project_name}_musical_keys" 2>/dev/null || true
+            docker volume rm "${project_name}_musical_logs" 2>/dev/null || true
+            docker volume rm "${project_name}_musical_secrets" 2>/dev/null || true
+            docker volume rm "${project_name}_musical_projects" 2>/dev/null || true
+            docker volume rm "${project_name}_musical_claude_sessions" 2>/dev/null || true
+            
+            log_info "Updating repository..."
             git fetch origin "$BRANCH" 2>/dev/null || true
             git reset --hard "origin/$BRANCH" 2>/dev/null || true
-            log_success "Repository updated"
+            log_success "Repository updated and old data cleaned"
         else
             log_error "Directory exists but is not a valid Musical installation"
             log_error "Please remove or backup the directory and try again:"
