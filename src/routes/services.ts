@@ -39,11 +39,25 @@ servicesRoutes.get('/', async (req: Request, res: Response) => {
     const postgresContainer = containers.find(c => 
       c.name.includes('postgres') && !c.name.includes('gitea')
     );
+    
+    // Check PostgreSQL connectivity
+    let postgresStatus: ServiceInfo['status'] = postgresContainer?.status || 'unknown';
+    let postgresHealth: ServiceInfo['health'] = postgresContainer?.health || 'unknown';
+    
+    // If Docker didn't find it, try to check connectivity
+    if (postgresStatus === 'unknown') {
+      const pgConnected = await checkPostgresConnection();
+      if (pgConnected) {
+        postgresStatus = 'running';
+        postgresHealth = 'healthy';
+      }
+    }
+    
     services.push({
       name: 'PostgreSQL',
       type: 'core',
-      status: postgresContainer?.status || 'unknown',
-      health: postgresContainer?.health || 'unknown',
+      status: postgresStatus,
+      health: postgresHealth,
       uptime: postgresContainer?.uptime,
       port: 5432,
       containerId: postgresContainer?.id,
@@ -63,11 +77,25 @@ servicesRoutes.get('/', async (req: Request, res: Response) => {
     });
 
     const giteaContainer = containers.find(c => c.name.includes('gitea') && !c.name.includes('db'));
+    
+    // Check Gitea connectivity
+    let giteaStatus: ServiceInfo['status'] = giteaContainer?.status || 'unknown';
+    let giteaHealth: ServiceInfo['health'] = giteaContainer?.health || 'unknown';
+    
+    // If Docker didn't find it, try to check connectivity
+    if (giteaStatus === 'unknown') {
+      const giteaConnected = await checkGiteaConnection();
+      if (giteaConnected) {
+        giteaStatus = 'running';
+        giteaHealth = 'healthy';
+      }
+    }
+    
     services.push({
       name: 'Gitea',
       type: 'core',
-      status: giteaContainer?.status || 'unknown',
-      health: giteaContainer?.health || 'unknown',
+      status: giteaStatus,
+      health: giteaHealth,
       uptime: giteaContainer?.uptime,
       port: 3000,
       containerId: giteaContainer?.id,
@@ -296,4 +324,62 @@ async function getContainerDetails(containerId: string): Promise<any> {
     logger.error('Failed to get container details', { error });
     return {};
   }
+}
+
+/**
+ * Check PostgreSQL connectivity
+ */
+async function checkPostgresConnection(): Promise<boolean> {
+  try {
+    const { Pool } = require('pg');
+    const pool = new Pool({
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME || 'musical_local',
+      user: process.env.DB_USER || 'musical',
+      password: process.env.DB_PASSWORD,
+      connectionTimeoutMillis: 3000,
+    });
+    
+    const client = await pool.connect();
+    await client.query('SELECT 1');
+    client.release();
+    await pool.end();
+    return true;
+  } catch (error) {
+    logger.debug('PostgreSQL connection check failed', { error });
+    return false;
+  }
+}
+
+/**
+ * Check Gitea connectivity
+ */
+async function checkGiteaConnection(): Promise<boolean> {
+  // Try multiple possible Gitea URLs
+  const giteaUrls = [
+    process.env.GITEA_URL,
+    'http://musical-gitea:3000',
+    'http://gitea:3000',
+    'http://local-gitea:3000',
+    'http://localhost:17101',  // External port
+    'http://localhost:3000',
+  ].filter(Boolean) as string[];
+
+  for (const giteaUrl of giteaUrls) {
+    try {
+      const response = await fetch(`${giteaUrl}/api/v1/version`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (response.ok) {
+        logger.debug('Gitea connection successful', { url: giteaUrl });
+        return true;
+      }
+    } catch (error) {
+      // Try next URL
+    }
+  }
+  
+  logger.debug('Gitea connection check failed - no URLs worked');
+  return false;
 }
