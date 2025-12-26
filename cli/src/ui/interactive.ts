@@ -97,8 +97,12 @@ export class InteractiveUI {
     for (const instance of instances) {
       const statusIcon = instance.status === 'running' ? chalk.green('●') : chalk.red('○');
       const authIcon = instance.authenticated ? chalk.green('✓') : chalk.yellow('!');
+      // Show name if different from id
+      const displayName = instance.name && instance.name !== instance.id 
+        ? `${instance.name} (${instance.id})`
+        : instance.id;
       choices.push({
-        name: `${statusIcon} ${instance.id} (port ${instance.port}) ${authIcon}`,
+        name: `${statusIcon} ${displayName} (port ${instance.port}) ${authIcon}`,
         value: instance.id
       });
     }
@@ -122,7 +126,7 @@ export class InteractiveUI {
   }
 
   private printInstanceTable(instances: InstanceInfo[]): void {
-    const cols = { instance: 15, status: 10, port: 8, tunnel: 35, auth: 8 };
+    const cols = { instance: 25, status: 10, port: 8, tunnel: 35, auth: 8 };
 
     console.log(
       chalk.dim('  ') +
@@ -145,9 +149,14 @@ export class InteractiveUI {
           : instance.tunnelUrl;
       }
 
+      // Show name if different from id, otherwise just show id
+      const displayName = instance.name && instance.name !== instance.id 
+        ? `${instance.name} (${instance.id})`
+        : instance.id;
+
       console.log(
         '  ' +
-        chalk.cyan(instance.id.padEnd(cols.instance)) +
+        chalk.cyan(displayName.padEnd(cols.instance)) +
         statusColor(instance.status.padEnd(cols.status)) +
         String(instance.port).padEnd(cols.port) +
         chalk.dim(tunnelDisplay.padEnd(cols.tunnel)) +
@@ -417,16 +426,14 @@ export class InteractiveUI {
       choices.push({ name: '▶️  Start all services', value: 'start-all' });
       choices.push({ name: '⏹️  Stop all services', value: 'stop-all' });
       choices.push(new inquirer.Separator());
-      // Future: Add service
-      // choices.push({ name: '➕ Add new service', value: 'add' });
-      choices.push({ name: '⬅️  Back', value: 'back' });
+      choices.push({ name: '⬅️  Back to instance menu', value: 'back' });
 
       const { action } = await inquirer.prompt([{
         type: 'list',
         name: 'action',
         message: 'Select action:',
         choices,
-        pageSize: 15
+        pageSize: 20
       }]);
 
       if (action === 'back') {
@@ -631,12 +638,17 @@ export class InteractiveUI {
     const { confirmAgain } = await inquirer.prompt([{
       type: 'input',
       name: 'confirmAgain',
-      message: `Type "${instanceId}" to confirm deletion:`,
-      validate: (input: string) => input === instanceId || 'Instance ID does not match'
+      message: `Type "${instanceId}" to confirm deletion (or "cancel" to abort):`,
+      validate: (input: string) => {
+        if (input.toLowerCase() === 'cancel' || input === '') {
+          return true; // Allow cancel/empty to proceed
+        }
+        return input === instanceId || `Instance ID does not match. Type "${instanceId}" or "cancel" to abort.`;
+      }
     }]);
 
     if (confirmAgain !== instanceId) {
-      console.log('Cancelled.');
+      console.log(chalk.yellow('Deletion cancelled.'));
       return false;
     }
 
@@ -773,12 +785,22 @@ export class InteractiveUI {
       default: options.name || `${instanceId!.charAt(0).toUpperCase() + instanceId!.slice(1)} Server`
     }]);
 
-    // Port
-    let port = options.port ? parseInt(options.port) : undefined;
-    if (!port) {
+    // Port selection with immediate system-level validation
+    let port: number | undefined = options.port ? parseInt(options.port) : undefined;
+    
+    while (!port) {
+      // Find the next available port range
       let suggestedPort = 17100;
+      
+      // First avoid ports used by other Musical instances
       while (usedPorts.has(suggestedPort)) {
         suggestedPort += 100;
+      }
+      
+      // Then verify it's actually available on the system
+      let systemCheckPort = await this.instanceManager.findAvailablePortRange(suggestedPort, 20);
+      if (systemCheckPort) {
+        suggestedPort = systemCheckPort;
       }
 
       const { portInput } = await inquirer.prompt([{
@@ -792,12 +814,40 @@ export class InteractiveUI {
             return 'Port must be between 1024 and 65535';
           }
           if (usedPorts.has(p)) {
-            return `Port ${p} is already in use by another instance`;
+            return `Port ${p} is already in use by another Musical instance`;
           }
           return true;
         }
       }]);
-      port = parseInt(portInput);
+      
+      const candidatePort = parseInt(portInput);
+      
+      // Check system port availability for all 3 ports
+      console.log(chalk.dim(`\n  Checking port availability for ${candidatePort}, ${candidatePort + 1}, ${candidatePort + 100}...`));
+      const portCheck = await this.instanceManager.checkPortsAvailable(candidatePort);
+      
+      if (!portCheck.available) {
+        console.log(chalk.red(`\n  ❌ Port conflict detected!`));
+        for (const unavailablePort of portCheck.unavailablePorts) {
+          let portRole = '';
+          if (unavailablePort === candidatePort) portRole = '(server)';
+          else if (unavailablePort === candidatePort + 1) portRole = '(gitea)';
+          else if (unavailablePort === candidatePort + 100) portRole = '(gitea-ssh)';
+          console.log(chalk.red(`     Port ${unavailablePort} ${portRole} is already in use on this system`));
+        }
+        
+        // Suggest next available range
+        const nextAvailable = await this.instanceManager.findAvailablePortRange(candidatePort + 100, 20);
+        if (nextAvailable) {
+          console.log(chalk.yellow(`\n  💡 Suggested alternative: ${nextAvailable}`));
+        }
+        console.log('');
+        // Loop back to port selection
+        continue;
+      }
+      
+      console.log(chalk.green(`  ✅ All ports available\n`));
+      port = candidatePort;
     }
 
     // Create configuration
@@ -864,13 +914,37 @@ export class InteractiveUI {
 
     if (startNow) {
       await this.instanceManager.start(instanceId!);
-    }
+      
+      // Wait a moment for the instance to be ready
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      console.log('');
+      console.log(chalk.green.bold('Installation complete! 🎉'));
+      console.log('');
+      
+      // Ask to authenticate now
+      const { authenticateNow } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'authenticateNow',
+        message: 'Authenticate now?',
+        default: true
+      }]);
 
-    console.log('');
-    console.log(chalk.green.bold('Installation complete! 🎉'));
-    console.log('');
-    console.log(`Next: Authenticate with ${chalk.cyan(`musical auth login ${instanceId}`)}`);
-    console.log('');
+      if (authenticateNow) {
+        // Run the login flow directly
+        await this.authManager.login(instanceId!);
+      } else {
+        console.log(`Later: Authenticate with ${chalk.cyan(`musical auth login ${instanceId}`)}`);
+        console.log('');
+      }
+    } else {
+      console.log('');
+      console.log(chalk.green.bold('Installation complete! 🎉'));
+      console.log('');
+      console.log(`Next: Start with ${chalk.cyan(`musical start ${instanceId}`)}`);
+      console.log(`Then: Authenticate with ${chalk.cyan(`musical auth login ${instanceId}`)}`);
+      console.log('');
+    }
     
     await this.pause();
   }

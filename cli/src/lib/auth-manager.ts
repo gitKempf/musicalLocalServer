@@ -29,7 +29,7 @@ export class AuthManager {
   }
 
   /**
-   * Start device authentication flow
+   * Start server authentication flow
    */
   async login(instanceId?: string): Promise<void> {
     const spinner = ora('Starting authentication...').start();
@@ -46,14 +46,43 @@ export class AuthManager {
         port = instance.port;
       }
 
-      // Start device auth flow
-      const response = await axios.post(`http://localhost:${port}/api/auth/device`);
-      const { deviceCode, userCode, verificationUrl, expiresIn } = response.data;
+      // Start server auth flow
+      const response = await axios.post(`http://localhost:${port}/api/auth/server`);
+      
+      // Check if already authenticated
+      if (response.data.error === 'Already authenticated') {
+        spinner.succeed('Already authenticated!');
+        const user = response.data.user;
+        if (user) {
+          console.log('');
+          console.log(chalk.green('✅ Logged in as: ') + chalk.bold(user.email));
+          console.log(chalk.green('   User ID: ') + user.userId);
+          console.log('');
+          
+          // Save auth info
+          this.saveAuthInfo(instanceId || 'default', {
+            userId: user.userId,
+            email: user.email,
+            accessToken: user.accessToken,
+            refreshToken: user.refreshToken,
+            expiresAt: new Date(user.expiresAt)
+          });
+        }
+        return;
+      }
+      
+      // Check if auth was started successfully
+      if (!response.data.success || !response.data.userCode) {
+        spinner.fail(`Authentication failed: ${response.data.error || 'Unknown error'}`);
+        return;
+      }
+      
+      const { userCode, verificationUrl, expiresIn } = response.data;
 
       spinner.stop();
 
       console.log('');
-      console.log(chalk.bold('🔐 Device Authentication'));
+      console.log(chalk.bold('🔐 Server Authentication'));
       console.log('');
       console.log(`To authenticate, visit: ${chalk.cyan.underline(verificationUrl)}`);
       console.log('');
@@ -71,9 +100,8 @@ export class AuthManager {
         await new Promise(resolve => setTimeout(resolve, pollInterval));
 
         try {
-          const pollResponse = await axios.post(`http://localhost:${port}/api/auth/device/poll`, {
-            deviceCode
-          });
+          // Poll the local server - it handles polling Musical.run in the background
+          const pollResponse = await axios.post(`http://localhost:${port}/api/auth/server/poll`);
 
           if (pollResponse.data.authenticated) {
             pollSpinner.succeed('Authentication successful!');

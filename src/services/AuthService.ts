@@ -259,19 +259,19 @@ export class AuthService {
     logger.info('');
 
     try {
-      // Step 1: Request device code from Musical.run
+      // Step 1: Request auth code from Musical.run
       const serverName = process.env.SERVER_NAME || 'Local Server';
       const response = await axios.post(
-        `${this.authServiceUrl}/api/auth/device/code`,
+        `${this.authServiceUrl}/api/auth/server/code`,
         { serverName },
         { timeout: 10000 }
       );
 
       if (!response.data.success) {
-        throw new Error(response.data.error || 'Failed to get device code');
+        throw new Error(response.data.error || 'Failed to get auth code');
       }
 
-      const { deviceCode, userCode, verificationUrl, expiresIn, interval } = response.data;
+      const { authCode, userCode, verificationUrl, expiresIn, interval } = response.data;
 
       // Display instructions to user
       logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -298,7 +298,7 @@ export class AuthService {
 
         try {
           const statusResponse = await axios.get(
-            `${this.authServiceUrl}/api/auth/device/status/${deviceCode}`,
+            `${this.authServiceUrl}/api/auth/server/status/${authCode}`,
             { timeout: 10000 }
           );
 

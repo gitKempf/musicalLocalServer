@@ -20,6 +20,7 @@ export interface TunnelConfig {
   serverName?: string;     // Human-readable name (e.g., "Home Server")
   serverType: 'local' | 'cloud';
   heartbeatIntervalMs?: number;
+  onRevoked?: () => void;  // Callback when server authorization is revoked
 }
 
 export class TunnelRegistrationService {
@@ -28,6 +29,7 @@ export class TunnelRegistrationService {
   private tunnelUrl: string | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private registered: boolean = false;
+  private revoked: boolean = false;
   private serverId: string;
 
   constructor(config: TunnelConfig) {
@@ -188,17 +190,38 @@ export class TunnelRegistrationService {
 
   /**
    * Send heartbeat to tunnel router
+   * Includes tunnelUrl to ensure it stays fresh if cloudflared restarts
+   * Handles revocation responses
    */
   private async sendHeartbeat(): Promise<void> {
-    if (!this.registered) {
+    if (!this.registered || this.revoked) {
       return;
     }
 
     try {
-      await this.client.post('/api/tunnel/heartbeat', {
+      const response = await this.client.post('/api/tunnel/heartbeat', {
         userId: this.config.userId,
         serverId: this.serverId,
+        tunnelUrl: this.tunnelUrl, // Include tunnel URL to keep it fresh
+        serverName: this.config.serverName, // Include server name to keep it updated
       });
+
+      // Check if authorization was revoked
+      if (response.data.revoked) {
+        logger.warn('⛔ Server authorization has been revoked!', {
+          userId: this.config.userId,
+          serverId: this.serverId,
+        });
+        this.revoked = true;
+        this.registered = false;
+        this.stopHeartbeat();
+        
+        // Notify the caller (e.g., CLI) that authorization was revoked
+        if (this.config.onRevoked) {
+          this.config.onRevoked();
+        }
+        return;
+      }
 
       logger.debug('💓 Heartbeat sent', { userId: this.config.userId, serverId: this.serverId });
     } catch (error) {
@@ -229,6 +252,13 @@ export class TunnelRegistrationService {
    */
   isRegistered(): boolean {
     return this.registered;
+  }
+
+  /**
+   * Check if server authorization was revoked
+   */
+  isRevoked(): boolean {
+    return this.revoked;
   }
 
   /**

@@ -97,29 +97,19 @@ class LocalServer {
     await encryptionService.initialize();
     logger.info('🔐 Encryption service initialized');
 
-    // Initialize authentication
+    // Initialize authentication (but don't block on it - we'll auth after HTTP server starts)
     await this.authService.initialize();
 
-    // Auto-authenticate with Musical.run (if enabled and not already authenticated)
-    if (AUTO_AUTH_ENABLED && !this.authService.isAuthenticated()) {
-      logger.info('🔑 Authenticating with Musical.run...');
-      logger.info('');
-
-      try {
-        // Use CLI authentication (supports env vars and prompts)
-        await this.authService.authenticate({ useCLI: true });
-        logger.info('');
-      } catch (error: any) {
-        logger.error('❌ Authentication failed', { error: error.message });
-        logger.warn('⚠️  Local server will work in offline mode (no cloud sync)');
-        logger.info('💡 You can authenticate later via /api/auth endpoints');
-      }
-    } else if (this.authService.isAuthenticated()) {
+    // Skip auto-auth here - it will be done after HTTP server starts
+    // This allows CLI and API to connect and trigger auth
+    if (this.authService.isAuthenticated()) {
       const userData = this.authService.getUserData();
       logger.info('✅ Already authenticated', {
         email: userData?.email,
         userId: userData?.userId,
       });
+    } else {
+      logger.info('💡 Server will start first, then authenticate (allows CLI/API access)');
     }
 
     // Initialize Claude Session Manager with health check (optional for standalone mode)
@@ -270,17 +260,38 @@ class LocalServer {
     const tunnelUrl = await this.cloudflared.start();
     logger.info('✅ Cloudflare Tunnel started', { tunnelUrl });
 
+    // Get instance name from environment
+    const instanceName = process.env.INSTANCE_NAME || 'Local Server';
+
     // Initialize Tunnel Registration service
     this.tunnelRegistration = new TunnelRegistrationService({
       tunnelRouterUrl: TUNNEL_ROUTER_URL,
       userId,
       serverType: 'local',
+      serverName: instanceName,
       heartbeatIntervalMs: 30000,
+      onRevoked: async () => {
+        logger.error('⛔ SERVER AUTHORIZATION REVOKED!');
+        logger.error('⛔ The user has revoked this server from the Musical.run dashboard.');
+        logger.error('⛔ Stopping tunnel and server. Re-authentication required.');
+        
+        // Stop the cloudflared tunnel
+        if (this.cloudflared) {
+          this.cloudflared.stop();
+        }
+        
+        // Mark the server as needing re-auth by clearing the auth token
+        // The CLI will detect this on next status check
+        await this.authService.logout();
+        
+        // Exit with a special code to indicate revocation
+        process.exit(42);
+      },
     });
 
     // Register tunnel with router
     await this.tunnelRegistration.register(tunnelUrl);
-    logger.info('✅ Tunnel registered with router', { userId });
+    logger.info('✅ Tunnel registered with router', { userId, serverName: instanceName });
   }
 
   private setupMiddleware() {
@@ -313,6 +324,7 @@ class LocalServer {
         status: 'healthy',
         version: '1.0.0',
         uptime: process.uptime(),
+        instanceName: process.env.INSTANCE_NAME || 'Local Server',
         publicKey: encryptionService.getPublicKey(),
         authenticated: this.authService.isAuthenticated(),
         user: userData ? {
@@ -339,11 +351,27 @@ class LocalServer {
   async start() {
     await this.initialize();
 
-    this.server.listen(PORT, () => {
+    this.server.listen(PORT, async () => {
       logger.info(`🚀 Musical.run Local Server running on port ${PORT}`);
       logger.info(`📡 WebSocket server ready`);
       logger.info(`🔑 Public Key: ${encryptionService.getPublicKey().substring(0, 32)}...`);
       logger.info('');
+
+      // Auto-authenticate AFTER HTTP server is running (allows CLI/API access during auth)
+      if (AUTO_AUTH_ENABLED && !this.authService.isAuthenticated()) {
+        logger.info('🔑 Authenticating with Musical.run...');
+        logger.info('');
+
+        try {
+          // Use CLI authentication (supports env vars and prompts)
+          await this.authService.authenticate({ useCLI: true });
+          logger.info('');
+        } catch (error: any) {
+          logger.error('❌ Authentication failed', { error: (error as Error).message });
+          logger.warn('⚠️  Local server will work in offline mode (no cloud sync)');
+          logger.info('💡 You can authenticate later via /api/auth endpoints');
+        }
+      }
 
       // Display authentication info
       if (this.authService.isAuthenticated()) {

@@ -43,8 +43,13 @@ export async function listInstances(options: { json?: boolean }): Promise<void> 
         : instance.tunnelUrl;
     }
 
+    // Show name if different from id, otherwise just show id
+    const displayName = instance.name && instance.name !== instance.id 
+      ? `${instance.name} (${instance.id})`
+      : instance.id;
+
     data.push([
-      chalk.cyan(instance.id),
+      chalk.cyan(displayName),
       statusColor(instance.status),
       String(instance.port),
       chalk.dim(tunnelDisplay),

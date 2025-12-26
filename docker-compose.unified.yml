@@ -1,0 +1,225 @@
+# Musical.run Local Server - Unified Multi-Instance Configuration
+#
+# This is the ONLY docker-compose configuration file needed.
+# Supports single and multi-instance deployments via INSTANCE_ID.
+#
+# Usage:
+#   # Single instance (default)
+#   docker-compose -f docker-compose.unified.yml up -d
+#
+#   # Multiple instances
+#   INSTANCE_ID=home MUSICAL_PORT=17100 docker-compose -f docker-compose.unified.yml --project-name musical-home up -d
+#   INSTANCE_ID=work MUSICAL_PORT=18100 docker-compose -f docker-compose.unified.yml --project-name musical-work up -d
+#
+# Each instance is fully isolated with its own:
+#   - Docker network
+#   - Containers (postgres, gitea, claude-agent, local-server)
+#   - Volumes (persistent data)
+#   - Ports
+
+services:
+  # ============================================================================
+  # PostgreSQL Database
+  # Shared by local-server and Gitea within this instance
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: musical-postgres-${INSTANCE_ID:-default}
+    hostname: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: musical
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-musical_secure_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U musical"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - musical-network
+    labels:
+      - "musical.service=postgres"
+      - "musical.instance=${INSTANCE_ID:-default}"
+      - "musical.port.internal=5432"
+
+  # ============================================================================
+  # Gitea Git Server
+  # Required for project containers to pull code
+  # ============================================================================
+  gitea:
+    image: gitea/gitea:latest
+    container_name: musical-gitea-${INSTANCE_ID:-default}
+    hostname: gitea
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=postgres:5432
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=musical
+      - GITEA__database__PASSWD=${DB_PASSWORD:-musical_secure_pass}
+      - GITEA__server__ROOT_URL=http://localhost:${GITEA_PORT:-17101}/
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY:-change_this_secret_key}
+    ports:
+      - "${GITEA_PORT:-17101}:3000"
+      - "${GITEA_SSH_PORT:-2222}:22"
+    volumes:
+      - gitea_data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - musical-network
+    labels:
+      - "musical.service=gitea"
+      - "musical.instance=${INSTANCE_ID:-default}"
+      - "musical.port.external=${GITEA_PORT:-17101}"
+      - "musical.port.ssh=${GITEA_SSH_PORT:-2222}"
+
+  # ============================================================================
+  # Claude Agent
+  # Manages Claude Code CLI sessions for AI-powered code generation
+  # ============================================================================
+  claude-agent:
+    build:
+      context: ./claude-agent
+      dockerfile: Dockerfile
+    image: musical-claude-agent:${INSTANCE_ID:-default}
+    container_name: musical-claude-agent-${INSTANCE_ID:-default}
+    hostname: claude-agent
+    restart: unless-stopped
+    environment:
+      - PORT=17110
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CLAUDE_AUTO_SHUTDOWN_MINUTES=${CLAUDE_AUTO_SHUTDOWN_MINUTES:-30}
+    volumes:
+      # Claude Code authentication (read-only)
+      - ${CLAUDE_CONFIG_PATH:-~/.config/claude-code}:/root/.config/claude-code:ro
+      # Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Session data
+      - claude_sessions:/app/.claude-sessions
+    networks:
+      - musical-network
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "node"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      - "musical.service=claude-agent"
+      - "musical.instance=${INSTANCE_ID:-default}"
+      - "musical.port.internal=17110"
+
+  # ============================================================================
+  # Musical Local Server
+  # Main API server that orchestrates all services
+  # ============================================================================
+  musical-local:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: musical-local-server:${INSTANCE_ID:-default}
+    container_name: musical-local-${INSTANCE_ID:-default}
+    hostname: musical-local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gitea:
+        condition: service_started
+    ports:
+      - "${MUSICAL_PORT:-17100}:17100"
+    environment:
+      # Instance identification
+      - INSTANCE_ID=${INSTANCE_ID:-default}
+      - INSTANCE_NAME=${INSTANCE_NAME:-Local Server}
+
+      # Musical.run cloud connection
+      - TUNNEL_ROUTER_URL=${TUNNEL_ROUTER_URL:-https://musical.run}
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-https://musical.run}
+      - TUNNEL_ENABLED=${TUNNEL_ENABLED:-true}
+
+      # Database connection (internal network)
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=musical_local
+      - DB_USER=musical
+      - DB_PASSWORD=${DB_PASSWORD:-musical_secure_pass}
+
+      # Gitea connection (internal network)
+      - GITEA_URL=http://gitea:3000
+      - GITEA_CONTAINER=musical-gitea-${INSTANCE_ID:-default}
+      - GITEA_ADMIN_USER=${GITEA_ADMIN_USER:-musical}
+      - GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD}
+      - GITEA_TOKEN=${GITEA_TOKEN:-}
+      - GITEA_USERNAME=${GITEA_USERNAME:-musical}
+
+      # Claude Agent connection (internal network)
+      - CLAUDE_AGENT_URL=http://claude-agent:17110
+
+      # Docker network for spawned project containers
+      - DOCKER_NETWORK=musical-network-${INSTANCE_ID:-default}
+
+      # Auto-setup configuration
+      - AUTO_SETUP=${AUTO_SETUP:-true}
+      - AUTO_AUTH_ENABLED=${AUTO_AUTH_ENABLED:-false}
+
+      # Optional: Anthropic API key (if not using Claude Code CLI auth)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # Encryption key for secure communication
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+
+    volumes:
+      # Instance data persistence
+      - musical_data:/root/.musical
+      # Docker socket for creating project containers
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    networks:
+      - musical-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:17100/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "musical.service=local-server"
+      - "musical.instance=${INSTANCE_ID:-default}"
+      - "musical.port.external=${MUSICAL_PORT:-17100}"
+      - "musical.version=1.0.0"
+
+# ============================================================================
+# Networks
+# Each instance gets its own isolated network
+# ============================================================================
+networks:
+  musical-network:
+    name: musical-network-${INSTANCE_ID:-default}
+    driver: bridge
+    labels:
+      - "musical.instance=${INSTANCE_ID:-default}"
+
+# ============================================================================
+# Volumes
+# Each instance gets its own persistent storage
+# ============================================================================
+volumes:
+  postgres_data:
+    name: musical-postgres-${INSTANCE_ID:-default}
+  gitea_data:
+    name: musical-gitea-${INSTANCE_ID:-default}
+  claude_sessions:
+    name: musical-claude-${INSTANCE_ID:-default}
+  musical_data:
+    name: musical-data-${INSTANCE_ID:-default}

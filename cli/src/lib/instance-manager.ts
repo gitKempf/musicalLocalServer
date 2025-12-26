@@ -186,10 +186,65 @@ export class InstanceManager {
 
     console.log(chalk.blue(`Starting instance '${instanceId}'...`));
 
-    const composeFile = 'docker-compose.yml';
+    // Load instance config to get ports and credentials
+    const config = this.getConfig(instanceId);
+    
+    // Build environment variables for docker-compose
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      INSTANCE_ID: instanceId,
+    };
+
+    // Add config values if available
+    if (config) {
+      env.INSTANCE_NAME = config.instanceName || instanceId;
+      env.MUSICAL_PORT = String(config.musicalPort || 17100);
+      env.GITEA_PORT = String(config.giteaPort || 17101);
+      env.GITEA_SSH_PORT = String(config.giteaSshPort || 2222);
+      env.DB_PASSWORD = config.dbPassword || 'musical_secure_pass';
+      env.GITEA_ADMIN_PASSWORD = config.giteaAdminPassword || '';
+      env.GITEA_SECRET_KEY = config.giteaSecretKey || '';
+      env.ENCRYPTION_KEY = config.encryptionKey || '';
+      env.TUNNEL_ENABLED = String(config.tunnelEnabled ?? true);
+      env.TUNNEL_ROUTER_URL = config.tunnelRouterUrl || 'https://musical.run';
+      env.AUTH_SERVICE_URL = config.authServiceUrl || 'https://musical.run';
+      if (config.anthropicApiKey) {
+        env.ANTHROPIC_API_KEY = config.anthropicApiKey;
+      }
+    }
+
+    // Also try to load .env file from install directory
+    const envFiles = [
+      path.join(installDir, `.env.${instanceId}`),
+      path.join(installDir, '.env'),
+    ];
+    
+    for (const envFile of envFiles) {
+      if (fs.existsSync(envFile)) {
+        const envContent = fs.readFileSync(envFile, 'utf-8');
+        for (const line of envContent.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.startsWith('#')) {
+            const [key, ...valueParts] = trimmed.split('=');
+            if (key && valueParts.length > 0) {
+              // Don't override already set values from config
+              if (!env[key]) {
+                env[key] = valueParts.join('=');
+              }
+            }
+          }
+        }
+        break; // Only load first existing env file
+      }
+    }
+
+    const composeFile = fs.existsSync(path.join(installDir, 'docker-compose.unified.yml')) 
+      ? 'docker-compose.unified.yml' 
+      : 'docker-compose.yml';
+      
     const { stdout, stderr } = await execAsync(
       `cd "${installDir}" && docker compose -f ${composeFile} --project-name musical-${instanceId} up -d`,
-      { env: { ...process.env, INSTANCE_ID: instanceId } }
+      { env }
     );
 
     if (stderr && !stderr.includes('Started')) {
@@ -205,13 +260,19 @@ export class InstanceManager {
   async stop(instanceId: string): Promise<void> {
     console.log(chalk.blue(`Stopping instance '${instanceId}'...`));
 
-    // For default instance, try legacy names first
+    // For default instance, try BOTH legacy names AND new naming convention
     const isDefault = instanceId === 'default';
     const containers = isDefault ? [
+      // Legacy names (old installs)
       'musical-local',
       'musical-postgres',
       'musical-gitea',
-      'musical-claude-agent'
+      'musical-claude-agent',
+      // New naming convention with -default suffix
+      'musical-local-default',
+      'musical-postgres-default',
+      'musical-gitea-default',
+      'musical-claude-agent-default'
     ] : [
       `musical-local-${instanceId}`,
       `musical-postgres-${instanceId}`,
@@ -219,7 +280,24 @@ export class InstanceManager {
       `musical-claude-agent-${instanceId}`
     ];
 
-    for (const name of containers) {
+    // Stop local server first to allow graceful unregistration from tunnel router
+    const localServerContainers = containers.filter(c => c.includes('local'));
+    for (const name of localServerContainers) {
+      try {
+        const container = this.docker.getContainer(name);
+        const info = await container.inspect().catch(() => null);
+        if (info?.State?.Running) {
+          console.log(chalk.dim(`  Stopping ${name} (allowing graceful tunnel unregistration)...`));
+          await container.stop({ t: 10 }); // Give 10 seconds to unregister
+        }
+      } catch {
+        // Container might not exist or already stopped
+      }
+    }
+
+    // Then stop other containers
+    const otherContainers = containers.filter(c => !c.includes('local'));
+    for (const name of otherContainers) {
       try {
         const container = this.docker.getContainer(name);
         await container.stop();
@@ -240,13 +318,19 @@ export class InstanceManager {
     // Stop containers
     await this.stop(instanceId);
 
-    // For default instance, try legacy names first
+    // For default instance, try BOTH legacy names AND new naming convention
     const isDefault = instanceId === 'default';
     const containers = isDefault ? [
+      // Legacy names (old installs)
       'musical-local',
       'musical-postgres',
       'musical-gitea',
-      'musical-claude-agent'
+      'musical-claude-agent',
+      // New naming convention with -default suffix
+      'musical-local-default',
+      'musical-postgres-default',
+      'musical-gitea-default',
+      'musical-claude-agent-default'
     ] : [
       `musical-local-${instanceId}`,
       `musical-postgres-${instanceId}`,
@@ -403,14 +487,45 @@ export class InstanceManager {
    * Find installation directory for an instance
    */
   private getInstallDir(instanceId: string): string | null {
-    const possiblePaths = [
+    // First check if there's a saved config with installDir
+    const config = this.getConfig(instanceId);
+    if (config && (config as any).installDir && fs.existsSync((config as any).installDir)) {
+      return (config as any).installDir;
+    }
+
+    // Check for docker-compose.unified.yml first (new format with INSTANCE_ID support)
+    const unifiedPaths = [
       path.join(process.env.HOME || '/root', `musical-local-server-${instanceId}`),
-      path.join(process.env.HOME || '/root', 'musical-local-server'),
       '/root/local-server',
-      path.join(process.cwd())
+      path.join(process.cwd()),
+      path.join(process.env.HOME || '/root', 'musical-local-server'),
     ];
 
-    for (const p of possiblePaths) {
+    // Prefer paths with docker-compose.unified.yml (supports multi-instance)
+    for (const p of unifiedPaths) {
+      if (fs.existsSync(path.join(p, 'docker-compose.unified.yml'))) {
+        return p;
+      }
+    }
+
+    // Fall back to docker-compose.yml only if it has INSTANCE_ID support
+    for (const p of unifiedPaths) {
+      const composeFile = path.join(p, 'docker-compose.yml');
+      if (fs.existsSync(composeFile)) {
+        // Check if this docker-compose.yml supports INSTANCE_ID
+        try {
+          const content = fs.readFileSync(composeFile, 'utf-8');
+          if (content.includes('${INSTANCE_ID') || content.includes('INSTANCE_ID:-')) {
+            return p;
+          }
+        } catch {
+          // Can't read file, skip
+        }
+      }
+    }
+
+    // Last resort: return any path with docker-compose.yml
+    for (const p of unifiedPaths) {
       if (fs.existsSync(path.join(p, 'docker-compose.yml'))) {
         return p;
       }
@@ -456,5 +571,79 @@ export class InstanceManager {
       result += chars[randomBytes[i] % chars.length];
     }
     return result;
+  }
+
+  /**
+   * Check if a single port is available on the system
+   */
+  async isPortAvailable(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const net = require('net');
+      const server = net.createServer();
+      
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          resolve(false);
+        } else {
+          resolve(false); // Other errors also mean port is not available
+        }
+      });
+      
+      server.once('listening', () => {
+        server.close();
+        resolve(true);
+      });
+      
+      server.listen(port, '0.0.0.0');
+    });
+  }
+
+  /**
+   * Check if all ports for an instance are available
+   * Returns an object with port availability status
+   */
+  async checkPortsAvailable(basePort: number): Promise<{
+    available: boolean;
+    serverPort: { port: number; available: boolean };
+    giteaPort: { port: number; available: boolean };
+    sshPort: { port: number; available: boolean };
+    unavailablePorts: number[];
+  }> {
+    const serverPort = basePort;
+    const giteaPort = basePort + 1;
+    const sshPort = basePort + 100;
+
+    const [serverAvailable, giteaAvailable, sshAvailable] = await Promise.all([
+      this.isPortAvailable(serverPort),
+      this.isPortAvailable(giteaPort),
+      this.isPortAvailable(sshPort),
+    ]);
+
+    const unavailablePorts: number[] = [];
+    if (!serverAvailable) unavailablePorts.push(serverPort);
+    if (!giteaAvailable) unavailablePorts.push(giteaPort);
+    if (!sshAvailable) unavailablePorts.push(sshPort);
+
+    return {
+      available: serverAvailable && giteaAvailable && sshAvailable,
+      serverPort: { port: serverPort, available: serverAvailable },
+      giteaPort: { port: giteaPort, available: giteaAvailable },
+      sshPort: { port: sshPort, available: sshAvailable },
+      unavailablePorts,
+    };
+  }
+
+  /**
+   * Find the next available port range starting from a base port
+   */
+  async findAvailablePortRange(startPort: number = 17100, maxAttempts: number = 20): Promise<number | null> {
+    for (let i = 0; i < maxAttempts; i++) {
+      const port = startPort + (i * 100);
+      const result = await this.checkPortsAvailable(port);
+      if (result.available) {
+        return port;
+      }
+    }
+    return null;
   }
 }

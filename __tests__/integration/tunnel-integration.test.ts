@@ -38,6 +38,7 @@ describe('Tunnel Integration Tests', () => {
       userId: 'test_user',
       serverType: 'local',
       heartbeatIntervalMs: 1000, // 1 second for testing
+      serverName: 'Test Server',
     });
   });
 
@@ -81,7 +82,10 @@ describe('Tunnel Integration Tests', () => {
 
       expect(mockAxiosInstance.post).toHaveBeenCalledWith(
         '/api/tunnel/unregister',
-        { userId: 'test_user' }
+        expect.objectContaining({
+          userId: 'test_user',
+          serverId: expect.stringContaining('server_')
+        })
       );
 
       expect(tunnelService.isRegistered()).toBe(false);
@@ -107,7 +111,11 @@ describe('Tunnel Integration Tests', () => {
       );
 
       expect(heartbeatCall).toBeDefined();
-      expect(heartbeatCall[1]).toEqual({ userId: 'test_user' });
+      expect(heartbeatCall[1]).toMatchObject({ 
+        userId: 'test_user',
+        serverName: 'Test Server',
+        serverId: expect.stringContaining('server_'),
+      });
     });
 
     it('should get tunnel status', async () => {
@@ -124,7 +132,7 @@ describe('Tunnel Integration Tests', () => {
       const status = await tunnelService.getStatus();
 
       expect(mockAxiosInstance.get).toHaveBeenCalledWith(
-        '/api/tunnel/status/test_user'
+        expect.stringMatching(/^\/api\/tunnel\/status\/test_user/)
       );
       expect(status.connected).toBe(true);
     });
@@ -159,6 +167,66 @@ describe('Tunnel Integration Tests', () => {
       const callsAfter = mockAxiosInstance.post.mock.calls.length;
 
       expect(callsAfter).toBe(callsBefore);
+    });
+
+    it('should send serverName in heartbeat when configured', async () => {
+      const customTunnelService = new TunnelRegistrationService({
+        tunnelRouterUrl: 'http://localhost:17200',
+        userId: 'test_user',
+        serverType: 'local',
+        heartbeatIntervalMs: 1000,
+        serverName: 'Custom Server Name',
+      });
+
+      const mockAxiosInstance = mockedAxios.create() as any;
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { success: true },
+      });
+
+      await customTunnelService.register('https://test.trycloudflare.com');
+
+      // Wait for at least one heartbeat
+      await new Promise(resolve => setTimeout(resolve, 1200));
+
+      const heartbeatCalls = mockAxiosInstance.post.mock.calls.filter(
+        (call: any) => call[0] === '/api/tunnel/heartbeat'
+      );
+
+      expect(heartbeatCalls.length).toBeGreaterThanOrEqual(1);
+      expect(heartbeatCalls[0][1]).toMatchObject({
+        userId: 'test_user',
+        serverName: 'Custom Server Name',
+      });
+
+      customTunnelService.cleanup();
+    });
+
+    it('should not send serverName if not configured', async () => {
+      const noNameTunnelService = new TunnelRegistrationService({
+        tunnelRouterUrl: 'http://localhost:17200',
+        userId: 'test_user_2',
+        serverType: 'local',
+        heartbeatIntervalMs: 1000,
+      });
+
+      const mockAxiosInstance = mockedAxios.create() as any;
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { success: true },
+      });
+
+      await noNameTunnelService.register('https://test2.trycloudflare.com');
+
+      // Wait for at least one heartbeat
+      await new Promise(resolve => setTimeout(resolve, 1200));
+
+      const heartbeatCalls = mockAxiosInstance.post.mock.calls.filter(
+        (call: any) => call[0] === '/api/tunnel/heartbeat'
+      );
+
+      expect(heartbeatCalls.length).toBeGreaterThanOrEqual(1);
+      expect(heartbeatCalls[0][1].serverName).toBeUndefined();
+
+      noNameTunnelService.cleanup();
     });
   });
 

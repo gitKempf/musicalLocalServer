@@ -39,7 +39,7 @@ authRoutes.get('/status', (req: Request, res: Response) => {
  * POST /api/auth/start
  * Start authentication flow (non-blocking)
  * Returns auth URL that user must visit manually
- * For Docker environments, use /api/auth/device instead
+ * For Docker environments, use /api/auth/server instead
  */
 authRoutes.post('/start', async (req: Request, res: Response) => {
   try {
@@ -51,13 +51,13 @@ authRoutes.post('/start', async (req: Request, res: Response) => {
       });
     }
 
-    // Check if we're in Docker - recommend device code flow
+    // Check if we're in Docker - recommend server auth flow
     if (process.env.DOCKER_CONTAINER === 'true') {
       return res.json({
         success: true,
-        message: 'For Docker environments, use /api/auth/device for browser-based authentication',
-        useDeviceAuth: true,
-        deviceAuthUrl: '/api/auth/device',
+        message: 'For Docker environments, use /api/auth/server for browser-based authentication',
+        useServerAuth: true,
+        serverAuthUrl: '/api/auth/server',
       });
     }
 
@@ -92,12 +92,11 @@ authRoutes.post('/start', async (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/auth/device
- * Start device code authentication flow
- * This is the recommended auth method for Docker/remote environments
+ * POST /api/auth/server
+ * Start server instance authentication flow
  * Returns a verification URL and user code to display
  */
-authRoutes.post('/device', async (req: Request, res: Response) => {
+authRoutes.post('/server', async (req: Request, res: Response) => {
   try {
     if (authService.isAuthenticated()) {
       return res.json({
@@ -107,29 +106,27 @@ authRoutes.post('/device', async (req: Request, res: Response) => {
       });
     }
 
-    // Start device code authentication in the background
-    // The response includes the verification URL for the user
     const authServiceUrl = process.env.AUTH_SERVICE_URL || 'https://musical.run';
     const serverName = process.env.SERVER_NAME || req.body.serverName || 'Local Server';
 
-    // Request device code from Musical.run
+    // Request auth code from Musical.run
     const axios = require('axios');
     const response = await axios.post(
-      `${authServiceUrl}/api/auth/device/code`,
+      `${authServiceUrl}/api/auth/server/code`,
       { serverName },
       { timeout: 10000 }
     );
 
     if (!response.data.success) {
-      throw new Error(response.data.error || 'Failed to get device code');
+      throw new Error(response.data.error || 'Failed to get auth code');
     }
 
-    const { deviceCode, userCode, verificationUrl, expiresIn, interval } = response.data;
+    const { authCode, userCode, verificationUrl, expiresIn, interval } = response.data;
 
-    logger.info('🔑 Device code authentication started', { userCode, verificationUrl });
+    logger.info('🔑 Server authentication started', { userCode, verificationUrl });
 
     // Start polling in the background
-    pollDeviceCodeInBackground(authService, authServiceUrl, deviceCode, interval);
+    pollServerAuthInBackground(authService, authServiceUrl, authCode, interval);
 
     res.json({
       success: true,
@@ -147,7 +144,7 @@ authRoutes.post('/device', async (req: Request, res: Response) => {
       ],
     });
   } catch (error: any) {
-    logger.error('❌ Failed to start device authentication', { error: error.message });
+    logger.error('❌ Failed to start server authentication', { error: error.message });
     res.status(500).json({
       success: false,
       error: error.message,
@@ -155,8 +152,44 @@ authRoutes.post('/device', async (req: Request, res: Response) => {
   }
 });
 
-// Background polling for device code
-async function pollDeviceCodeInBackground(authService: any, authServiceUrl: string, deviceCode: string, interval: number) {
+/**
+ * POST /api/auth/server/poll
+ * Poll for server authentication completion
+ * This is called by the CLI to check if the user has completed authentication
+ */
+authRoutes.post('/server/poll', async (req: Request, res: Response) => {
+  try {
+    // Check if authenticated
+    if (authService.isAuthenticated()) {
+      const userData = authService.getUserData();
+      return res.json({
+        authenticated: true,
+        userId: userData?.userId,
+        email: userData?.email,
+        fullName: userData?.fullName,
+        accessToken: userData?.accessToken,
+        refreshToken: userData?.refreshToken,
+        expiresAt: userData?.expiresAt,
+      });
+    }
+
+    // Not yet authenticated - return pending status
+    return res.status(400).json({
+      authenticated: false,
+      error: 'authorization_pending',
+      message: 'Waiting for user to complete authentication',
+    });
+  } catch (error: any) {
+    logger.error('❌ Server poll error', { error: error.message });
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Background polling for server authentication
+async function pollServerAuthInBackground(authService: any, authServiceUrl: string, authCode: string, interval: number) {
   const axios = require('axios');
   const pollInterval = (interval || 5) * 1000;
   const maxPollTime = 15 * 60 * 1000; // 15 minutes
@@ -167,7 +200,7 @@ async function pollDeviceCodeInBackground(authService: any, authServiceUrl: stri
 
     try {
       const statusResponse = await axios.get(
-        `${authServiceUrl}/api/auth/device/status/${deviceCode}`,
+        `${authServiceUrl}/api/auth/server/status/${authCode}`,
         { timeout: 10000 }
       );
 
@@ -183,24 +216,24 @@ async function pollDeviceCodeInBackground(authService: any, authServiceUrl: stri
         };
 
         await authService.setToken(tokenData);
-        logger.info('✅ Device authentication successful', { userId: tokenData.userId, email: tokenData.email });
+        logger.info('✅ Server authentication successful', { userId: tokenData.userId, email: tokenData.email });
         return;
       }
 
       if (statusResponse.data.status !== 'pending') {
-        logger.warn('⚠️ Device authentication failed', { status: statusResponse.data.status });
+        logger.warn('⚠️ Server authentication failed', { status: statusResponse.data.status });
         return;
       }
     } catch (error: any) {
       if (error.response?.status === 403 || error.response?.status === 404 || error.response?.status === 410) {
-        logger.warn('⚠️ Device code expired or denied');
+        logger.warn('⚠️ Auth code expired or denied');
         return;
       }
       // Continue polling on other errors
     }
   }
 
-  logger.warn('⚠️ Device authentication timeout');
+  logger.warn('⚠️ Server authentication timeout');
 }
 
 /**
