@@ -8,11 +8,13 @@ yarn-error.log*
 dist/
 build/
 
-# Environment
+# Environment - NEVER commit these!
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 config/.env
+cli/.env*
+!cli/.env.example
 
 # Logs
 logs/
