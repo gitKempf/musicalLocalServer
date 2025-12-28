@@ -3,7 +3,7 @@
 
 FROM node:20-bullseye
 
-# Install system dependencies including SSH server
+# Install system dependencies including SSH server and jq for hooks
 RUN apt-get update && apt-get install -y \
     curl \
     git \
@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     openssh-server \
     sudo \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure SSH
@@ -51,6 +52,14 @@ RUN chmod +x /app/mcp-server-git.js
 # Copy Claude Code configuration
 COPY claude-config.json /root/.config/claude-code/config.json
 RUN mkdir -p /root/.config/claude-code
+
+# Copy Claude settings with hooks configuration
+COPY settings.json /root/.claude/settings.json
+RUN mkdir -p /root/.claude/hooks
+
+# Copy hook scripts
+COPY hooks/ /root/.claude/hooks/
+RUN chmod +x /root/.claude/hooks/*.sh
 
 # Configure Git
 RUN git config --global user.name "Claude Code" && \

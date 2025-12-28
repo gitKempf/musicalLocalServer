@@ -14,6 +14,61 @@ This container runs Claude Code CLI and manages coding sessions. It provides a R
 - **Activity Tracking**: Monitors and logs session activity
 - **Health Checks**: Built-in health monitoring endpoint
 - **Graceful Shutdown**: Handles SIGTERM/SIGINT signals properly
+- **Auto-Commit Hooks**: Automatically commits changes when Claude finishes inference
+
+## Auto-Commit on Stop Feature
+
+The claude-agent includes built-in hooks that automatically create git commits when Claude finishes working. This ensures all AI-generated changes are properly versioned.
+
+### How It Works
+
+```
+User sends prompt to Claude
+  ↓
+Claude works on the code
+  ├─ Creates/edits files
+  ├─ Runs tests
+  └─ Finishes responding
+  ↓
+🎯 STOP HOOK TRIGGERS
+  ↓
+Git commit created automatically
+  ├─ Includes summary of changes
+  ├─ Lists modified files
+  └─ Pushes to Gitea (if configured)
+```
+
+### Hook Files
+
+- `/root/.claude/hooks/commit-on-stop.sh` - Commits after each inference completion
+- `/root/.claude/hooks/commit-on-session-end.sh` - Final commit when session ends
+- `/root/.claude/settings.json` - Hook configuration
+
+### Commit Message Format
+
+```
+🤖 Claude inference complete (550e8400)
+
+Summary: Created authentication module with JWT tokens...
+
+Changes:
+src/auth.py
+src/middleware.py
+tests/test_auth.py
+
+Statistics: 3 files changed, 145 insertions(+), 12 deletions(-)
+Timestamp: 2025-12-26 12:00:00 UTC
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+### Debugging Hooks
+
+Hook logs are written to `/tmp/claude-hooks.log` inside the container:
+
+```bash
+docker exec musical-claude-agent-main cat /tmp/claude-hooks.log
+```
 
 ## Architecture
 
