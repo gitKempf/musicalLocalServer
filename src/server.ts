@@ -289,9 +289,17 @@ class LocalServer {
       },
     });
 
-    // Register tunnel with router
-    await this.tunnelRegistration.register(tunnelUrl);
-    logger.info('✅ Tunnel registered with router', { userId, serverName: instanceName });
+    // Register tunnel with router (with retries)
+    try {
+      await this.tunnelRegistration.register(tunnelUrl);
+      logger.info('✅ Tunnel registered with router', { userId, serverName: instanceName });
+    } catch (error) {
+      // Log but don't fail - tunnel is working, just registration failed
+      // The heartbeat will try to re-register periodically
+      logger.warn('⚠️  Initial tunnel registration failed, will retry via heartbeat', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private setupMiddleware() {

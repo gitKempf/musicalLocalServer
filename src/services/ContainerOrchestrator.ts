@@ -231,6 +231,9 @@ export class ContainerOrchestrator {
         giteaUser,
       });
 
+      // Setup Claude hooks for auto-commit
+      await this.setupClaudeHooks(container);
+
       const containerInfo: ContainerInfo = {
         containerId,
         dockerId: info.Id,
@@ -287,6 +290,236 @@ export class ContainerOrchestrator {
     } catch (error: any) {
       logger.warn('⚠️  Failed to install Claude CLI', { error: error.message });
       // Don't fail container creation if Claude install fails
+    }
+  }
+
+  /**
+   * Setup Claude hooks for auto-commit after code generation
+   * These hooks automatically commit and push changes when Claude finishes generating code
+   */
+  private async setupClaudeHooks(container: Docker.Container): Promise<void> {
+    try {
+      logger.info('🔧 Setting up Claude hooks for auto-commit');
+
+      // Create hooks directory
+      await this.execInContainer(container, `
+        mkdir -p /root/.claude/hooks
+      `);
+
+      // Create settings.json with Stop and SessionEnd hooks
+      const settingsJson = JSON.stringify({
+        hooks: {
+          Stop: [
+            {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'bash /root/.claude/hooks/commit-on-stop.sh'
+                }
+              ]
+            }
+          ],
+          SessionEnd: [
+            {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command', 
+                  command: 'bash /root/.claude/hooks/commit-on-session-end.sh'
+                }
+              ]
+            }
+          ]
+        }
+      }, null, 2);
+
+      await this.execInContainer(container, `
+        cat > /root/.claude/settings.json << 'SETTINGS_EOF'
+${settingsJson}
+SETTINGS_EOF
+      `);
+
+      // Create commit-on-stop.sh hook script
+      const commitOnStopScript = `#!/bin/bash
+################################################################################
+# Stop Hook - Commit when Claude finishes inference
+################################################################################
+
+# Read JSON input from stdin
+INPUT=\$(cat)
+
+# Parse JSON fields
+SESSION_ID=\$(echo "\$INPUT" | jq -r '.session_id // "unknown"')
+CWD=\$(echo "\$INPUT" | jq -r '.cwd // "/app"')
+STOP_HOOK_ACTIVE=\$(echo "\$INPUT" | jq -r '.stop_hook_active // "false"')
+
+LOG_FILE="/tmp/claude-hooks.log"
+
+log() {
+    echo "[\$(date -u +"%Y-%m-%d %H:%M:%S")] \$1" >> "\$LOG_FILE"
+}
+
+log "Stop hook triggered - Session: \$SESSION_ID, CWD: \$CWD"
+
+# Change to working directory
+cd "\$CWD" || cd /app || {
+    log "Failed to change to directory"
+    exit 0
+}
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    log "Not a git repository, skipping commit"
+    exit 0
+fi
+
+# Prevent infinite loop
+if [ "\$STOP_HOOK_ACTIVE" = "true" ]; then
+    log "Stop hook already active, skipping"
+    exit 0
+fi
+
+# Check for changes
+if git diff-index --quiet HEAD -- 2>/dev/null; then
+    if [ -z "\$(git ls-files --others --exclude-standard)" ]; then
+        log "No changes to commit"
+        exit 0
+    fi
+fi
+
+TIMESTAMP=\$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+STATS=\$(git diff --stat HEAD 2>/dev/null | tail -1)
+MODIFIED_FILES=\$(git diff --name-only HEAD 2>/dev/null | head -10)
+UNTRACKED_FILES=\$(git ls-files --others --exclude-standard | head -5)
+
+ALL_FILES="\${MODIFIED_FILES}\${UNTRACKED_FILES:+
+\$UNTRACKED_FILES}"
+
+COMMIT_MSG="🤖 Claude inference complete (\${SESSION_ID:0:8})
+
+Modified files:
+\${ALL_FILES}
+
+Statistics: \${STATS}
+Timestamp: \${TIMESTAMP}
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+
+# Stage all changes
+git add -A
+
+# Commit
+if git commit -m "\$COMMIT_MSG" 2>/dev/null; then
+    log "✅ Changes committed"
+    echo "✅ Changes committed"
+    
+    # Push to remote
+    CURRENT_BRANCH=\$(git branch --show-current 2>/dev/null || echo "main")
+    if git push origin "\$CURRENT_BRANCH" 2>/dev/null; then
+        log "✅ Pushed to remote"
+        echo "✅ Pushed to remote"
+    else
+        log "⚠️ Could not push to remote"
+    fi
+else
+    log "⚠️ No changes to commit"
+fi
+
+exit 0
+`;
+
+      await this.execInContainer(container, `
+        cat > /root/.claude/hooks/commit-on-stop.sh << 'HOOK_EOF'
+${commitOnStopScript}
+HOOK_EOF
+        chmod +x /root/.claude/hooks/commit-on-stop.sh
+      `);
+
+      // Create commit-on-session-end.sh hook script
+      const commitOnSessionEndScript = `#!/bin/bash
+################################################################################
+# SessionEnd Hook - Final commit when session ends
+################################################################################
+
+INPUT=\$(cat)
+
+SESSION_ID=\$(echo "\$INPUT" | jq -r '.session_id // "unknown"')
+CWD=\$(echo "\$INPUT" | jq -r '.cwd // "/app"')
+REASON=\$(echo "\$INPUT" | jq -r '.reason // "unknown"')
+
+LOG_FILE="/tmp/claude-hooks.log"
+
+log() {
+    echo "[\$(date -u +"%Y-%m-%d %H:%M:%S")] \$1" >> "\$LOG_FILE"
+}
+
+log "SessionEnd hook triggered - Session: \$SESSION_ID, Reason: \$REASON"
+
+cd "\$CWD" || cd /app || exit 0
+
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    log "Not a git repository"
+    exit 0
+fi
+
+if git diff-index --quiet HEAD -- 2>/dev/null; then
+    if [ -z "\$(git ls-files --others --exclude-standard)" ]; then
+        log "No uncommitted changes"
+        exit 0
+    fi
+fi
+
+TIMESTAMP=\$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+STATS=\$(git diff --stat HEAD 2>/dev/null | tail -1)
+MODIFIED_FILES=\$(git diff --name-only HEAD 2>/dev/null)
+UNTRACKED_FILES=\$(git ls-files --others --exclude-standard)
+
+ALL_FILES="\${MODIFIED_FILES}\${UNTRACKED_FILES:+
+\$UNTRACKED_FILES}"
+
+COMMIT_MSG="🤖 Claude session ended (\${SESSION_ID:0:8})
+
+Reason: \${REASON}
+
+Modified files:
+\${ALL_FILES}
+
+Statistics: \${STATS}
+Timestamp: \${TIMESTAMP}
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+
+git add -A
+
+if git commit -m "\$COMMIT_MSG" 2>/dev/null; then
+    log "✅ Final session commit created"
+    
+    CURRENT_BRANCH=\$(git branch --show-current 2>/dev/null || echo "main")
+    if git push origin "\$CURRENT_BRANCH" 2>/dev/null; then
+        log "✅ Pushed to remote"
+    fi
+fi
+
+exit 0
+`;
+
+      await this.execInContainer(container, `
+        cat > /root/.claude/hooks/commit-on-session-end.sh << 'HOOK_EOF'
+${commitOnSessionEndScript}
+HOOK_EOF
+        chmod +x /root/.claude/hooks/commit-on-session-end.sh
+      `);
+
+      // Install jq for JSON parsing in hooks (needed by the scripts)
+      await this.execInContainer(container, `
+        apt-get update -qq && apt-get install -y -qq jq >/dev/null 2>&1 || true
+      `);
+
+      logger.info('✅ Claude hooks configured for auto-commit');
+    } catch (error: any) {
+      logger.warn('⚠️  Failed to setup Claude hooks', { error: error.message });
+      // Don't fail container creation if hooks setup fails
     }
   }
 
@@ -364,11 +597,11 @@ export class ContainerOrchestrator {
 
   /**
    * Initialize Git repository in container (REAL REPOSITORY)
-   * This creates an actual Git repo and connects it to Gitea
+   * This creates an actual Git repo and optionally connects it to Gitea
    */
   async initializeGitRepository(
     containerId: string,
-    repoCloneUrl: string,
+    repoCloneUrl: string | null,
     projectName: string
   ): Promise<void> {
     const containerInfo = this.containers.get(containerId);
@@ -378,7 +611,7 @@ export class ContainerOrchestrator {
 
     logger.info('🔧 Initializing Git repository in container', {
       containerId,
-      repoCloneUrl,
+      repoCloneUrl: repoCloneUrl || '(local only)',
       projectName,
     });
 
@@ -407,14 +640,34 @@ export class ContainerOrchestrator {
 
       logger.info('✅ Initial files created');
 
-      // Set remote origin
-      await this.execInContainer(container, `
-        cd /app &&
-        git remote remove origin 2>/dev/null || true &&
-        git remote add origin ${repoCloneUrl}
-      `);
+      // Set remote origin only if we have a Gitea repo URL
+      if (repoCloneUrl) {
+        // Convert external URL to internal Docker network URL with credentials
+        // External: http://localhost:17101/musical/repo.git
+        // Internal: http://musical:TOKEN@gitea:3000/musical/repo.git
+        let internalUrl = repoCloneUrl;
+        const giteaToken = process.env.GITEA_TOKEN;
+        const giteaUser = process.env.GITEA_USERNAME || process.env.GITEA_ADMIN_USER || 'musical';
+        
+        // Replace localhost or external host with internal gitea hostname
+        internalUrl = internalUrl.replace(/http:\/\/localhost:\d+/, 'http://gitea:3000');
+        internalUrl = internalUrl.replace(/http:\/\/[^\/]+:\d+/, 'http://gitea:3000');
+        
+        // Add credentials to URL if we have them
+        if (giteaToken && giteaUser) {
+          internalUrl = internalUrl.replace('http://', `http://${giteaUser}:${giteaToken}@`);
+        }
+        
+        await this.execInContainer(container, `
+          cd /app &&
+          git remote remove origin 2>/dev/null || true &&
+          git remote add origin ${internalUrl}
+        `);
 
-      logger.info('✅ Git remote configured', { repoCloneUrl });
+        logger.info('✅ Git remote configured', { repoCloneUrl, internalUrl: internalUrl.replace(giteaToken || '', '***') });
+      } else {
+        logger.info('ℹ️  No remote configured (local Git only)');
+      }
 
       // Create initial commit
       await this.execInContainer(container, `

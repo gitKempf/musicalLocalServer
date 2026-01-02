@@ -176,32 +176,33 @@ sessionRoutes.post('/create', requireAuth, async (req, res) => {
     });
 
     // 3. Initialize Git repository and push to Gitea (if repo exists)
-    if (project.gitea_repo_url) {
-      try {
-        logger.info('🔧 Initializing Git repository in container', { projectId });
+    // Always initialize Git for hooks to work, even without Gitea
+    try {
+      logger.info('🔧 Initializing Git repository in container', { projectId });
 
-        await containerOrchestrator.initializeGitRepository(
-          containerInfo.containerId,
-          project.gitea_repo_url,
-          project.name
-        );
+      await containerOrchestrator.initializeGitRepository(
+        containerInfo.containerId,
+        project.gitea_repo_url || null, // Pass null if no Gitea repo
+        project.name
+      );
 
-        logger.info('✅ Git repository initialized', { projectId });
+      logger.info('✅ Git repository initialized', { projectId });
 
-        // Push initial commit to Gitea
+      // Push initial commit to Gitea only if we have a repo URL
+      if (project.gitea_repo_url) {
         logger.info('📤 Pushing initial commit to Gitea', { projectId });
         await containerOrchestrator.pushToGitea(containerInfo.containerId, 'main');
         logger.info('✅ Initial commit pushed to Gitea', { projectId });
-      } catch (error: any) {
-        logger.error('❌ Failed to initialize Git repository', {
-          projectId,
-          error: error.message,
-        });
-        // Don't fail the session creation if Git initialization fails
-        logger.warn('⚠️  Session created but Git initialization failed');
+      } else {
+        logger.info('ℹ️  No Gitea repository configured - Git initialized locally only', { projectId });
       }
-    } else {
-      logger.info('ℹ️  No Gitea repository configured for project', { projectId });
+    } catch (error: any) {
+      logger.error('❌ Failed to initialize Git repository', {
+        projectId,
+        error: error.message,
+      });
+      // Don't fail the session creation if Git initialization fails
+      logger.warn('⚠️  Session created but Git initialization failed');
     }
 
     // 4. Update project with container info and activity timestamp

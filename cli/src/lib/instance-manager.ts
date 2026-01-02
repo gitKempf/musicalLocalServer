@@ -66,19 +66,47 @@ export class InstanceManager {
 
   /**
    * Get all Musical.run instances on this machine
+   * Only shows instances with proper config OR that are actively running
    */
   async listInstances(): Promise<InstanceInfo[]> {
-    const containers = await this.docker.listContainers({ all: true });
     const instances = new Map<string, InstanceInfo>();
+    
+    // First, load instances from config directory (authoritative source)
+    const configuredInstances = this.getConfiguredInstanceIds();
+    for (const instanceId of configuredInstances) {
+      const config = this.getConfig(instanceId);
+      instances.set(instanceId, {
+        id: instanceId,
+        name: config?.instanceName || instanceId,
+        status: 'unknown',
+        port: config?.musicalPort || 17100,
+        giteaPort: config?.giteaPort || 17101,
+        authenticated: false,
+        health: {
+          postgres: false,
+          gitea: false,
+          claudeAgent: false,
+          localServer: false
+        }
+      });
+    }
+    
+    // Then check Docker containers for running instances
+    const containers = await this.docker.listContainers({ all: true });
 
     for (const container of containers) {
       const name = container.Names[0]?.replace('/', '') || '';
       
-      // Match musical-local-* or musical-local containers
-      const match = name.match(/^musical-local-(.+)$/) || (name === 'musical-local' ? ['', 'default'] : null);
+      // Match musical-local-* containers (running instances)
+      const match = name.match(/^musical-local-(.+)$/);
       if (!match) continue;
 
-      const instanceId = match[1] || 'default';
+      const instanceId = match[1];
+      
+      // Skip orphaned containers without config unless they're running
+      if (!instances.has(instanceId) && container.State !== 'running') {
+        continue;
+      }
       
       // Get or create instance info
       let instance = instances.get(instanceId);
@@ -238,9 +266,7 @@ export class InstanceManager {
       }
     }
 
-    const composeFile = fs.existsSync(path.join(installDir, 'docker-compose.unified.yml')) 
-      ? 'docker-compose.unified.yml' 
-      : 'docker-compose.yml';
+    const composeFile = 'docker-compose.yml';
       
     const { stdout, stderr } = await execAsync(
       `cd "${installDir}" && docker compose -f ${composeFile} --project-name musical-${instanceId} up -d`,
@@ -493,23 +519,16 @@ export class InstanceManager {
       return (config as any).installDir;
     }
 
-    // Check for docker-compose.unified.yml first (new format with INSTANCE_ID support)
-    const unifiedPaths = [
+    // Check for docker-compose.yml in standard locations
+    const possiblePaths = [
       path.join(process.env.HOME || '/root', `musical-local-server-${instanceId}`),
       '/root/local-server',
       path.join(process.cwd()),
       path.join(process.env.HOME || '/root', 'musical-local-server'),
     ];
 
-    // Prefer paths with docker-compose.unified.yml (supports multi-instance)
-    for (const p of unifiedPaths) {
-      if (fs.existsSync(path.join(p, 'docker-compose.unified.yml'))) {
-        return p;
-      }
-    }
-
-    // Fall back to docker-compose.yml only if it has INSTANCE_ID support
-    for (const p of unifiedPaths) {
+    // Find path with docker-compose.yml that supports INSTANCE_ID
+    for (const p of possiblePaths) {
       const composeFile = path.join(p, 'docker-compose.yml');
       if (fs.existsSync(composeFile)) {
         // Check if this docker-compose.yml supports INSTANCE_ID
@@ -525,7 +544,7 @@ export class InstanceManager {
     }
 
     // Last resort: return any path with docker-compose.yml
-    for (const p of unifiedPaths) {
+    for (const p of possiblePaths) {
       if (fs.existsSync(path.join(p, 'docker-compose.yml'))) {
         return p;
       }
@@ -543,6 +562,19 @@ export class InstanceManager {
       return null;
     }
     return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  }
+
+  /**
+   * Get all configured instance IDs from the config directory
+   */
+  getConfiguredInstanceIds(): string[] {
+    if (!fs.existsSync(this.configDir)) {
+      return [];
+    }
+    return fs.readdirSync(this.configDir).filter(name => {
+      const configPath = path.join(this.configDir, name, 'config.json');
+      return fs.existsSync(configPath);
+    });
   }
 
   /**

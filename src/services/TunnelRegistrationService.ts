@@ -74,49 +74,75 @@ export class TunnelRegistrationService {
   }
 
   /**
-   * Register tunnel with router
+   * Register tunnel with router (with retry logic)
    */
-  async register(tunnelUrl: string): Promise<void> {
-    try {
-      logger.info('🔌 Registering tunnel with router', {
-        tunnelUrl,
-        userId: this.config.userId,
-        serverId: this.serverId,
-        serverName: this.config.serverName,
-        serverType: this.config.serverType,
-      });
-
-      const response = await this.client.post('/api/tunnel/register', {
-        userId: this.config.userId,
-        serverId: this.serverId,
-        serverName: this.config.serverName || `Local Server (${this.serverId.substring(0, 8)})`,
-        tunnelUrl,
-        encryptionPubkey: encryptionService.getPublicKey(),
-        serverType: this.config.serverType,
-      });
-
-      if (response.data.success) {
-        this.tunnelUrl = tunnelUrl;
-        this.registered = true;
-        logger.info('✅ Tunnel registered successfully', {
+  async register(tunnelUrl: string, maxRetries: number = 5): Promise<void> {
+    let lastError: Error | null = null;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        logger.info('🔌 Registering tunnel with router', {
+          tunnelUrl,
           userId: this.config.userId,
           serverId: this.serverId,
-          tunnelUrl: tunnelUrl.substring(0, 30) + '...',
+          serverName: this.config.serverName,
+          serverType: this.config.serverType,
+          attempt,
+          maxRetries,
         });
 
-        // Start heartbeat
-        this.startHeartbeat();
-      } else {
-        throw new Error('Registration failed: ' + response.data.error);
+        const response = await this.client.post('/api/tunnel/register', {
+          userId: this.config.userId,
+          serverId: this.serverId,
+          serverName: this.config.serverName || `Local Server (${this.serverId.substring(0, 8)})`,
+          tunnelUrl,
+          encryptionPubkey: encryptionService.getPublicKey(),
+          serverType: this.config.serverType,
+        });
+
+        if (response.data.success) {
+          this.tunnelUrl = tunnelUrl;
+          this.registered = true;
+          logger.info('✅ Tunnel registered successfully', {
+            userId: this.config.userId,
+            serverId: this.serverId,
+            tunnelUrl: tunnelUrl.substring(0, 30) + '...',
+          });
+
+          // Start heartbeat
+          this.startHeartbeat();
+          return;
+        } else {
+          throw new Error('Registration failed: ' + response.data.error);
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        logger.warn(`⚠️  Registration attempt ${attempt}/${maxRetries} failed`, {
+          error: lastError.message,
+          userId: this.config.userId,
+          serverId: this.serverId,
+        });
+        
+        if (attempt < maxRetries) {
+          // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+          const delay = Math.min(2000 * Math.pow(2, attempt - 1), 32000);
+          logger.info(`⏳ Retrying in ${delay / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
       }
-    } catch (error) {
-      logger.error('❌ Failed to register tunnel', {
-        error: error instanceof Error ? error.message : String(error),
-        userId: this.config.userId,
-        serverId: this.serverId,
-      });
-      throw error;
     }
+    
+    // Even if registration failed, store the tunnelUrl and start heartbeat
+    // The heartbeat will attempt re-registration
+    this.tunnelUrl = tunnelUrl;
+    this.startHeartbeat();
+    
+    logger.error('❌ Failed to register tunnel after all retries, will retry via heartbeat', {
+      error: lastError?.message,
+      userId: this.config.userId,
+      serverId: this.serverId,
+    });
+    throw lastError;
   }
 
   /**
@@ -192,9 +218,28 @@ export class TunnelRegistrationService {
    * Send heartbeat to tunnel router
    * Includes tunnelUrl to ensure it stays fresh if cloudflared restarts
    * Handles revocation responses
+   * Also acts as re-registration if initial registration failed
    */
   private async sendHeartbeat(): Promise<void> {
-    if (!this.registered || this.revoked) {
+    if (this.revoked) {
+      return;
+    }
+
+    // If not registered yet but we have a tunnel URL, try to register
+    if (!this.registered && this.tunnelUrl) {
+      try {
+        logger.info('🔄 Attempting to register via heartbeat (initial registration failed)');
+        await this.registerOnce(this.tunnelUrl);
+        return;
+      } catch (error) {
+        logger.warn('⚠️  Heartbeat registration attempt failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
+
+    if (!this.registered) {
       return;
     }
 
@@ -229,6 +274,31 @@ export class TunnelRegistrationService {
       logger.warn('⚠️  Heartbeat request failed', {
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+  }
+
+  /**
+   * Single registration attempt (used by heartbeat re-registration)
+   */
+  private async registerOnce(tunnelUrl: string): Promise<void> {
+    const response = await this.client.post('/api/tunnel/register', {
+      userId: this.config.userId,
+      serverId: this.serverId,
+      serverName: this.config.serverName || `Local Server (${this.serverId.substring(0, 8)})`,
+      tunnelUrl,
+      encryptionPubkey: encryptionService.getPublicKey(),
+      serverType: this.config.serverType,
+    });
+
+    if (response.data.success) {
+      this.tunnelUrl = tunnelUrl;
+      this.registered = true;
+      logger.info('✅ Tunnel registered successfully via heartbeat', {
+        userId: this.config.userId,
+        serverId: this.serverId,
+      });
+    } else {
+      throw new Error('Registration failed: ' + response.data.error);
     }
   }
 

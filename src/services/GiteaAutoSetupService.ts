@@ -128,40 +128,74 @@ export class GiteaAutoSetupService {
   }
 
   /**
-   * Create admin user via Gitea CLI
+   * Create admin user via Gitea API (install endpoint)
+   * Falls back to checking if user exists and can authenticate
    */
   private async createAdminUser(password: string): Promise<boolean> {
-    logger.info('👤 Creating Gitea admin user...', { username: this.config.adminUsername });
+    logger.info('👤 Creating Gitea admin user via API...', { username: this.config.adminUsername });
 
     try {
-      // Try to create user
-      await execAsync(`docker exec -u git ${this.config.giteaContainer} gitea admin user create \
-        --username "${this.config.adminUsername}" \
-        --password "${password}" \
-        --email "${this.config.adminEmail}" \
-        --admin \
-        --must-change-password=false`);
-
-      logger.info('✅ Admin user created');
-      return true;
-    } catch (error: any) {
-      // User might already exist
-      if (error.message?.includes('already exists')) {
-        logger.info('👤 Admin user already exists, updating password...');
-
-        try {
-          await execAsync(`docker exec -u git ${this.config.giteaContainer} gitea admin user change-password \
-            --username "${this.config.adminUsername}" \
-            --password "${password}"`);
-
-          logger.info('✅ Admin password updated');
+      // First, check if we can already authenticate (user may exist)
+      try {
+        const authResponse = await this.client.get('/api/v1/user', {
+          auth: {
+            username: this.config.adminUsername,
+            password: password,
+          },
+        });
+        if (authResponse.status === 200) {
+          logger.info('✅ Admin user already exists and credentials work');
           return true;
-        } catch (updateError) {
-          logger.warn('⚠️  Could not update admin password', { error: updateError });
         }
+      } catch (authError: any) {
+        // User doesn't exist or password is wrong, continue with creation
+        logger.debug('User auth check failed, will try to create');
       }
 
-      logger.warn('⚠️  Could not create admin user via CLI, will try API', { error: error.message });
+      // Try Gitea's admin API if we have a way to auth
+      // For first-time setup, Gitea might need installation via web or CLI
+      // Since we can't use Docker exec, try the admin/users endpoint if accessible
+      try {
+        // Check if Gitea is in install mode (first run)
+        const settingsResponse = await this.client.get('/api/v1/settings/api');
+        logger.debug('Gitea settings accessible', { data: settingsResponse.data });
+      } catch (e) {
+        logger.debug('Could not access settings endpoint');
+      }
+
+      // If we reach here, user needs to be created via Gitea's install page
+      // or CLI. For Docker Compose setups, INSTALL_LOCK=true skips the installer,
+      // but we need to create the admin user another way.
+      
+      // Try to use Gitea's internal install API (works on some versions)
+      try {
+        const installResponse = await this.client.post('/install', {
+          db_type: 'postgres',
+          admin_name: this.config.adminUsername,
+          admin_passwd: password,
+          admin_confirm_passwd: password,
+          admin_email: this.config.adminEmail,
+        }, {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          maxRedirects: 0,
+          validateStatus: (status) => status < 500,
+        });
+        
+        if (installResponse.status < 400) {
+          logger.info('✅ Admin user created via install endpoint');
+          return true;
+        }
+      } catch (installError: any) {
+        logger.debug('Install endpoint not available', { error: installError.message });
+      }
+
+      // Last resort: check if the default admin user was created by Gitea
+      logger.warn('⚠️  Could not create admin user via API. Gitea may need manual setup or the user already exists with a different password.');
+      logger.info('💡 Tip: Set GITEA_ADMIN_PASSWORD environment variable to a known password, or create user manually in Gitea web UI');
+      
+      return false;
+    } catch (error: any) {
+      logger.error('❌ Failed to create admin user', { error: error.message });
       return false;
     }
   }

@@ -247,4 +247,106 @@ export class GiteaService {
     const repo = await this.getRepository(name);
     return repo !== null;
   }
+
+  /**
+   * Get commits for a repository (REAL API CALL)
+   */
+  async getCommits(
+    repoName: string,
+    options: { limit?: number; page?: number; branch?: string } = {}
+  ): Promise<{
+    commits: Array<{
+      sha: string;
+      message: string;
+      author: { name: string; email: string };
+      committer: { name: string; email: string };
+      timestamp: string;
+      url: string;
+    }>;
+    total?: number;
+  }> {
+    try {
+      const owner = this.organization || this.username;
+      const params = new URLSearchParams();
+      
+      if (options.limit) params.append('limit', options.limit.toString());
+      if (options.page) params.append('page', options.page.toString());
+      if (options.branch) params.append('sha', options.branch);
+
+      const response = await this.client.get(
+        `/api/v1/repos/${owner}/${repoName}/commits?${params.toString()}`
+      );
+
+      const commits = response.data.map((commit: any) => ({
+        sha: commit.sha,
+        message: commit.commit?.message || commit.message || '',
+        author: {
+          name: commit.commit?.author?.name || commit.author?.login || 'Unknown',
+          email: commit.commit?.author?.email || '',
+        },
+        committer: {
+          name: commit.commit?.committer?.name || commit.committer?.login || 'Unknown',
+          email: commit.commit?.committer?.email || '',
+        },
+        timestamp: commit.commit?.author?.date || commit.created || new Date().toISOString(),
+        url: commit.html_url || '',
+      }));
+
+      logger.debug('📜 Retrieved commits from Gitea', {
+        repo: repoName,
+        count: commits.length,
+      });
+
+      return { commits };
+    } catch (error: any) {
+      if (error.response?.status === 404) {
+        logger.warn('⚠️  Repository not found or no commits', { repoName });
+        return { commits: [] };
+      }
+      logger.error('❌ Failed to get commits', {
+        error: error.message,
+        repo: repoName,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get specific commit details
+   */
+  async getCommit(repoName: string, sha: string): Promise<{
+    sha: string;
+    message: string;
+    author: { name: string; email: string };
+    timestamp: string;
+    files?: Array<{ filename: string; status: string }>;
+  } | null> {
+    try {
+      const owner = this.organization || this.username;
+      const response = await this.client.get(
+        `/api/v1/repos/${owner}/${repoName}/git/commits/${sha}`
+      );
+
+      const commit = response.data;
+      return {
+        sha: commit.sha,
+        message: commit.commit?.message || commit.message || '',
+        author: {
+          name: commit.commit?.author?.name || commit.author?.login || 'Unknown',
+          email: commit.commit?.author?.email || '',
+        },
+        timestamp: commit.commit?.author?.date || commit.created || new Date().toISOString(),
+      };
+    } catch (error: any) {
+      if (error.response?.status === 404) {
+        return null;
+      }
+      logger.error('❌ Failed to get commit', {
+        error: error.message,
+        repo: repoName,
+        sha,
+      });
+      throw error;
+    }
+  }
 }

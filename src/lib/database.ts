@@ -134,6 +134,39 @@ export async function initializeDatabase(): Promise<void> {
     
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);`);
     
+    // Create preview_builds table for tracking webhook-triggered builds
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS preview_builds (
+        id UUID PRIMARY KEY,
+        project_id VARCHAR(50) REFERENCES projects(id) ON DELETE CASCADE,
+        commit_hash VARCHAR(64) NOT NULL,
+        branch VARCHAR(255) DEFAULT 'main',
+        status VARCHAR(50) DEFAULT 'building',
+        preview_url VARCHAR(500),
+        container_id VARCHAR(255),
+        pusher VARCHAR(255),
+        commit_message TEXT,
+        error TEXT,
+        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP
+      );
+    `);
+    
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_preview_builds_project_id ON preview_builds(project_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_preview_builds_status ON preview_builds(status);`);
+    
+    // Migration: Add preview_container_id and preview_port to projects table
+    try {
+      await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS preview_container_id VARCHAR(255);`);
+      await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS preview_port INTEGER;`);
+      await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS published_url VARCHAR(500);`);
+      await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS published_at TIMESTAMP;`);
+    } catch (err: any) {
+      if (!err.message?.includes('already exists')) {
+        throw err;
+      }
+    }
+    
     logger.info('✅ Database schema initialized successfully');
   } catch (error) {
     logger.error('❌ Failed to initialize database schema', {

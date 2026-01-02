@@ -69,6 +69,9 @@ services:
       - GITEA__server__HTTP_PORT=3000
       - GITEA__security__INSTALL_LOCK=true
       - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY:-change_this_secret_key}
+      # Allow webhooks to local-server for preview builds
+      - GITEA__webhook__ALLOWED_HOST_LIST=external,loopback,private,musical-local
+      - GITEA__webhook__SKIP_TLS_VERIFY=true
     ports:
       - "${GITEA_PORT:-17101}:3000"
       - "${GITEA_SSH_PORT:-2222}:22"

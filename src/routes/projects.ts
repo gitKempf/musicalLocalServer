@@ -123,6 +123,18 @@ projectRoutes.post('/', async (req, res) => {
           repoName: giteaRepo.name,
           cloneUrl: repoCloneUrl
         });
+
+        // Register webhook for automatic preview builds
+        try {
+          // Use internal Docker network URL for webhook
+          // The hostname is musical-local (from docker-compose service name)
+          const webhookUrl = `http://musical-local:${process.env.PORT || 17100}/api/webhook/gitea/${projectId}`;
+          await giteaService.createWebhook(repoName, webhookUrl, ['push']);
+          logger.info('✅ Webhook registered for preview builds', { projectId, webhookUrl });
+        } catch (webhookError: any) {
+          // Webhook registration is optional - don't fail project creation
+          logger.warn('⚠️  Failed to register webhook', { error: webhookError.message });
+        }
       } catch (error: any) {
         logger.error('❌ Failed to create Gitea repository', { error: error.message });
         // Continue without Gitea repo - project can still be created
@@ -335,6 +347,298 @@ projectRoutes.delete('/:projectId', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to delete project',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/projects/:projectId/commits
+ * Get commits from Gitea repository for the project
+ */
+projectRoutes.get('/:projectId/commits', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const userId = (req as any).user.userId;
+    const { limit = '20', page = '1', branch = 'main' } = req.query;
+
+    logger.info('📜 Fetching commits for project', { projectId, userId });
+
+    // Get project to find the Gitea repo
+    const project = await ProjectService.getProject(projectId, userId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found or access denied',
+      });
+    }
+
+    // Check if project has a Gitea repository
+    if (!project.gitea_repo_url || !giteaService) {
+      return res.status(400).json({
+        success: false,
+        error: 'Project does not have a Git repository',
+      });
+    }
+
+    // Extract repo name from the URL
+    const repoUrlMatch = project.gitea_repo_url.match(/\/([^\/]+)\.git$/);
+    const repoName = repoUrlMatch ? repoUrlMatch[1] : null;
+
+    if (!repoName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Could not determine repository name',
+      });
+    }
+
+    // Get commits from Gitea
+    const { commits } = await giteaService.getCommits(repoName, {
+      limit: parseInt(limit as string),
+      page: parseInt(page as string),
+      branch: branch as string,
+    });
+
+    res.json({
+      success: true,
+      projectId,
+      repoName,
+      commits,
+    });
+  } catch (error: any) {
+    logger.error('❌ Failed to get commits', { error: error.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve commits',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/projects/:projectId/builds
+ * Get build history for a project
+ */
+projectRoutes.get('/:projectId/builds', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const userId = (req as any).user.userId;
+
+    logger.info('📊 Fetching builds for project', { projectId, userId });
+
+    // Verify project access
+    const project = await ProjectService.getProject(projectId, userId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found or access denied',
+      });
+    }
+
+    // Import the webhook route to get builds
+    const { query } = await import('../lib/database');
+    const buildsResult = await query(
+      `SELECT * FROM preview_builds WHERE project_id = $1 ORDER BY started_at DESC LIMIT 20`,
+      [projectId]
+    );
+
+    const builds = buildsResult.rows.map((row: any) => ({
+      buildId: row.id,
+      projectId: row.project_id,
+      commitHash: row.commit_hash,
+      branch: row.branch,
+      status: row.status,
+      previewUrl: row.preview_url,
+      containerId: row.container_id,
+      pusher: row.pusher,
+      commitMessage: row.commit_message,
+      error: row.error,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+    }));
+
+    res.json({
+      success: true,
+      projectId,
+      builds,
+      currentPreview: {
+        url: project.preview_url,
+        containerId: project.preview_container_id,
+        published_url: project.published_url,
+        published_at: project.published_at,
+      },
+    });
+  } catch (error: any) {
+    logger.error('❌ Failed to get builds', { error: error.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve builds',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/projects/:projectId/rebuild
+ * Manually trigger a rebuild for a project with specific commit
+ */
+projectRoutes.post('/:projectId/rebuild', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const userId = (req as any).user.userId;
+    const { commitHash = 'HEAD', branch = 'main' } = req.body;
+
+    logger.info('🔄 Manual rebuild requested', { projectId, commitHash, branch });
+
+    // Verify project access
+    const project = await ProjectService.getProject(projectId, userId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found or access denied',
+      });
+    }
+
+    // Check if project has a Gitea repository
+    if (!project.gitea_repo_url) {
+      return res.status(400).json({
+        success: false,
+        error: 'Project does not have a Git repository',
+      });
+    }
+
+    // Import PreviewBuildService
+    const { PreviewBuildService } = await import('../services/PreviewBuildService');
+    const previewBuildService = new PreviewBuildService({
+      giteaUrl: process.env.GITEA_URL || 'http://gitea:3000',
+      giteaToken: process.env.GITEA_TOKEN,
+      giteaUser: process.env.GITEA_USERNAME || 'musical',
+      dockerNetwork: process.env.DOCKER_NETWORK || 'musical-network-main',
+    });
+    await previewBuildService.initialize();
+
+    // Trigger build
+    const buildResult = await previewBuildService.triggerBuild({
+      projectId,
+      commitHash,
+      branch,
+      repoUrl: project.gitea_repo_url,
+      userId: project.user_id,
+      pusher: 'manual',
+      commitMessage: `Manual rebuild: ${commitHash}`,
+    });
+
+    res.json({
+      success: true,
+      message: 'Rebuild triggered',
+      build: buildResult,
+    });
+  } catch (error: any) {
+    logger.error('❌ Rebuild failed', { error: error.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to trigger rebuild',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/projects/:projectId/publish
+ * Publish preview to public subdomain (e.g., {projectName}.musical.run)
+ */
+projectRoutes.post('/:projectId/publish', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const userId = (req as any).user.userId;
+
+    logger.info('🌐 Publishing project preview', { projectId, userId });
+
+    // Verify project access
+    const project = await ProjectService.getProject(projectId, userId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found or access denied',
+      });
+    }
+
+    // Check if project has an active preview
+    if (!project.preview_url || !project.preview_container_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Project does not have an active preview. Build the project first.',
+      });
+    }
+
+    // Get the tunnel URL for this local server
+    const tunnelUrl = process.env.TUNNEL_URL;
+    if (!tunnelUrl) {
+      return res.status(500).json({
+        success: false,
+        error: 'Local server tunnel URL not configured',
+      });
+    }
+
+    // Register with cloud preview-proxy service
+    const previewProxyUrl = process.env.PREVIEW_PROXY_URL || 'https://musical.run';
+    const axios = (await import('axios')).default;
+
+    // Create a clean project name for the subdomain
+    const sanitizedName = project.name
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .substring(0, 30);
+
+    const publicSubdomain = `${sanitizedName}-${projectId.slice(-8)}`;
+
+    try {
+      const response = await axios.post(`${previewProxyUrl}/api/preview/register`, {
+        projectId: publicSubdomain,
+        userId,
+        // The preview URL is accessed through the tunnel proxy
+        previewUrl: `${tunnelUrl}/api/preview/${projectId}/`,
+        serverType: 'local',
+      }, {
+        timeout: 10000,
+      });
+
+      // Update project with published URL
+      await ProjectService.updateProject(projectId, {
+        published_url: `https://${publicSubdomain}.preview.musical.run`,
+        published_at: new Date().toISOString(),
+      });
+
+      logger.info('✅ Project published successfully', {
+        projectId,
+        publicUrl: `https://${publicSubdomain}.preview.musical.run`,
+      });
+
+      res.json({
+        success: true,
+        message: 'Project published successfully',
+        publicUrl: `https://${publicSubdomain}.preview.musical.run`,
+        subdomain: publicSubdomain,
+      });
+    } catch (publishError: any) {
+      logger.error('❌ Failed to register with preview proxy', {
+        error: publishError.message,
+        response: publishError.response?.data,
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Failed to publish preview',
+        details: publishError.response?.data?.error || publishError.message,
+      });
+    }
+  } catch (error: any) {
+    logger.error('❌ Publish failed', { error: error.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to publish project',
       details: error.message,
     });
   }

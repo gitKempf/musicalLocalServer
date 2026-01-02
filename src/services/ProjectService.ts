@@ -20,6 +20,10 @@ export interface Project {
   ssh_port?: number;
   tunnel_url?: string;
   preview_url?: string;
+  preview_container_id?: string;
+  preview_port?: number;
+  published_url?: string;
+  published_at?: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -50,6 +54,10 @@ export interface UpdateProjectParams {
   giteaRepoId?: number;
   sshPort?: number;
   tunnelUrl?: string;
+  preview_container_id?: string;
+  preview_port?: number;
+  published_url?: string;
+  published_at?: string;
 }
 
 export interface ListProjectsOptions {
@@ -146,6 +154,10 @@ class ProjectService {
         giteaRepoId,
         sshPort,
         tunnelUrl,
+        preview_container_id,
+        preview_port,
+        published_url,
+        published_at,
       } = updates;
 
       const queryText = `
@@ -161,8 +173,12 @@ class ProjectService {
           gitea_repo_id = COALESCE($8, gitea_repo_id),
           ssh_port = COALESCE($9, ssh_port),
           tunnel_url = COALESCE($10, tunnel_url),
+          preview_container_id = COALESCE($11, preview_container_id),
+          preview_port = COALESCE($12, preview_port),
+          published_url = COALESCE($13, published_url),
+          published_at = COALESCE($14, published_at),
           updated_at = NOW()
-        WHERE id = $11
+        WHERE id = $15
         RETURNING *;
       `;
       const values = [
@@ -176,6 +192,10 @@ class ProjectService {
         giteaRepoId,
         sshPort,
         tunnelUrl,
+        preview_container_id,
+        preview_port,
+        published_url,
+        published_at,
         projectId,
       ];
 
