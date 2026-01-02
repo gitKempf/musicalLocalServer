@@ -23,6 +23,7 @@ import { CloudflaredService } from './services/CloudflaredService';
 import { ContainerOrchestrator } from './services/ContainerOrchestrator';
 import { GiteaService } from './services/GiteaService';
 import { GiteaAutoSetupService } from './services/GiteaAutoSetupService';
+import { initializePortRegistry } from './services/PortRegistry';
 import { setupRoutes } from './routes';
 import { setupSocketHandlers } from './sockets';
 import { initializeSessionRoutes } from './routes/sessions';
@@ -92,6 +93,10 @@ class LocalServer {
     // Initialize database schema (creates tables if they don't exist)
     await initializeDatabase();
     logger.info('🗄️  Database initialized');
+
+    // Initialize port registry for container port management
+    await initializePortRegistry();
+    logger.info('🔌 Port Registry initialized');
 
     // Initialize encryption
     await encryptionService.initialize();

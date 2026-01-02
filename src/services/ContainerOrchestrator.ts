@@ -2,6 +2,11 @@
  * Container Orchestrator for Local Server
  * Creates isolated Docker containers per project
  * Ported from backup GVisorProvider - Real implementation, no mocks
+ * 
+ * Port Management:
+ * - Uses centralized PortRegistry for database-backed port allocation
+ * - Survives server restarts
+ * - No port conflicts between containers
  */
 
 import Docker from 'dockerode';
@@ -9,6 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as tar from 'tar-stream';
 import { logger } from '../lib/logger';
 import * as net from 'net';
+import { getPortRegistry, PortRegistry } from './PortRegistry';
 
 export interface ContainerConfig {
   projectId: string;
@@ -43,8 +49,7 @@ export interface ExecResult {
 export class ContainerOrchestrator {
   private docker: Docker;
   private containers: Map<string, ContainerInfo>;
-  private allocatedPorts: Set<number>;
-  private nextPort: number;
+  private portRegistry: PortRegistry | null = null;
   private baseImage: string;
   private dockerNetwork: string;
   private giteaUrl: string;
@@ -57,15 +62,12 @@ export class ContainerOrchestrator {
   } = {}) {
     this.docker = new Docker();
     this.containers = new Map();
-    this.allocatedPorts = new Set();
-    this.nextPort = config.basePort || 30000;
     this.baseImage = config.baseImage || 'node:20-bullseye-slim';
     this.dockerNetwork = config.dockerNetwork || 'bridge';
     this.giteaUrl = config.giteaUrl || 'http://host.docker.internal:17101';
 
     logger.info('🐳 ContainerOrchestrator initialized', {
       baseImage: this.baseImage,
-      basePort: this.nextPort,
       network: this.dockerNetwork,
     });
   }
@@ -81,7 +83,11 @@ export class ContainerOrchestrator {
       // Ensure network exists or use default
       await this.ensureNetwork();
 
-      // Scan existing project containers to rebuild port allocation state
+      // Initialize port registry (database-backed)
+      this.portRegistry = getPortRegistry();
+      await this.portRegistry.initialize();
+
+      // Scan existing containers to populate in-memory cache
       await this.scanExistingContainers();
 
       logger.info('✅ Container orchestrator ready');
@@ -95,7 +101,8 @@ export class ContainerOrchestrator {
   }
 
   /**
-   * Scan existing containers to rebuild port allocation state
+   * Scan existing containers to populate in-memory cache
+   * Port sync is now handled by PortRegistry
    */
   private async scanExistingContainers(): Promise<void> {
     try {
@@ -104,26 +111,9 @@ export class ContainerOrchestrator {
         c.Names.some((name) => name.includes('/project-project_'))
       );
 
-      for (const container of projectContainers) {
-        // Extract ports from container
-        if (container.Ports) {
-          for (const portMapping of container.Ports) {
-            if (portMapping.PublicPort) {
-              this.allocatedPorts.add(portMapping.PublicPort);
-              // Update nextPort to be higher than any allocated port
-              if (portMapping.PublicPort >= this.nextPort) {
-                this.nextPort = portMapping.PublicPort + 1;
-              }
-            }
-          }
-        }
-      }
-
       if (projectContainers.length > 0) {
-        logger.info('🔍 Scanned existing containers', {
+        logger.info('🔍 Found existing project containers', {
           count: projectContainers.length,
-          allocatedPorts: Array.from(this.allocatedPorts).sort((a, b) => a - b),
-          nextPort: this.nextPort,
         });
       }
     } catch (error) {
@@ -160,9 +150,9 @@ export class ContainerOrchestrator {
 
     logger.info('🚀 Creating Docker container for project', { projectId, sessionId });
 
-    // Allocate ports
-    const devServerPort = await this.allocatePort();
-    const previewPort = await this.allocatePort();
+    // Allocate ports using centralized registry
+    const devServerPort = await this.allocatePort(projectId, 'project_dev');
+    const previewPort = await this.allocatePort(projectId, 'project_preview');
 
     const containerId = `project-${projectId}-${Date.now()}`;
 
@@ -254,11 +244,16 @@ export class ContainerOrchestrator {
         previewPort,
       });
 
+      // Mark ports as in use in the registry
+      if (this.portRegistry) {
+        await this.portRegistry.markPortInUse(devServerPort, containerId);
+        await this.portRegistry.markPortInUse(previewPort, containerId);
+      }
+
       return containerInfo;
     } catch (error) {
-      // Cleanup ports on failure
-      this.allocatedPorts.delete(devServerPort);
-      this.allocatedPorts.delete(previewPort);
+      // Release ports on failure
+      await this.releasePorts(projectId);
 
       logger.error('❌ Container creation failed', { error });
       throw error;
@@ -873,13 +868,8 @@ HOOK_EOF
       await container.stop({ t: 10 });
       await container.remove();
 
-      // Cleanup tracking
-      if (containerInfo.devServerPort) {
-        this.allocatedPorts.delete(containerInfo.devServerPort);
-      }
-      if (containerInfo.previewPort) {
-        this.allocatedPorts.delete(containerInfo.previewPort);
-      }
+      // Release ports via registry
+      await this.releasePorts(containerInfo.projectId);
       this.containers.delete(containerId);
 
       logger.info('✅ Container destroyed', { containerId });
@@ -993,27 +983,31 @@ HOOK_EOF
   }
 
   /**
-   * Allocate an available port
+   * Allocate an available port for a project
+   * Now uses the centralized PortRegistry for database-backed allocation
    */
-  private async allocatePort(): Promise<number> {
-    let port = this.nextPort;
-    let attempts = 0;
-
-    while (attempts < 100) {
-      if (!this.allocatedPorts.has(port) && (await this.isPortAvailable(port))) {
-        this.allocatedPorts.add(port);
-        this.nextPort = port + 1;
-        return port;
-      }
-      port++;
-      attempts++;
+  private async allocatePort(projectId: string, portType: 'project_dev' | 'project_preview'): Promise<number> {
+    if (!this.portRegistry) {
+      throw new Error('Port registry not initialized');
     }
 
-    throw new Error('Could not find available port after 100 attempts');
+    return this.portRegistry.allocatePort({
+      projectId,
+      portType,
+    });
   }
 
   /**
-   * Check if port is available
+   * Release ports for a project
+   */
+  private async releasePorts(projectId: string): Promise<void> {
+    if (this.portRegistry) {
+      await this.portRegistry.releaseProjectPorts(projectId);
+    }
+  }
+
+  /**
+   * Check if port is available (kept for compatibility)
    */
   private async isPortAvailable(port: number): Promise<boolean> {
     return new Promise((resolve) => {

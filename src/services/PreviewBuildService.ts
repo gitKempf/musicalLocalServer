@@ -9,6 +9,10 @@
  * 4. Starts a preview server
  * 5. Returns the preview URL
  * 
+ * Port Management:
+ * - Uses centralized PortRegistry for database-backed port allocation
+ * - Survives server restarts, no port conflicts
+ * 
  * NO MOCKS - Real implementation only
  */
 
@@ -17,6 +21,7 @@ import Docker from 'dockerode';
 import { logger } from '../lib/logger';
 import { query } from '../lib/database';
 import { ContainerOrchestrator } from './ContainerOrchestrator';
+import { getPortRegistry, PortRegistry } from './PortRegistry';
 
 export interface BuildConfig {
   projectId: string;
@@ -55,12 +60,11 @@ export class PreviewBuildService {
   private builds: Map<string, BuildResult>;
   private previewContainers: Map<string, PreviewContainer>;
   private buildLocks: Map<string, Promise<BuildResult>>; // Lock to prevent parallel builds
+  private portRegistry: PortRegistry | null = null;
   private giteaUrl: string;
   private giteaToken: string;
   private giteaUser: string;
   private dockerNetwork: string;
-  private basePort: number;
-  private allocatedPorts: Set<number>;
 
   constructor(config: {
     giteaUrl?: string;
@@ -73,18 +77,15 @@ export class PreviewBuildService {
     this.builds = new Map();
     this.previewContainers = new Map();
     this.buildLocks = new Map();
-    this.allocatedPorts = new Set();
     
     this.giteaUrl = config.giteaUrl || process.env.GITEA_URL || 'http://gitea:3000';
     this.giteaToken = config.giteaToken || process.env.GITEA_TOKEN || '';
     this.giteaUser = config.giteaUser || process.env.GITEA_USERNAME || 'musical';
     this.dockerNetwork = config.dockerNetwork || process.env.DOCKER_NETWORK || 'musical-network-main';
-    this.basePort = config.basePort || 31000; // Different range from project containers
 
     logger.info('🏗️  PreviewBuildService initialized', {
       giteaUrl: this.giteaUrl,
       dockerNetwork: this.dockerNetwork,
-      basePort: this.basePort,
     });
   }
 
@@ -107,6 +108,7 @@ export class PreviewBuildService {
 
   /**
    * Scan existing preview containers to rebuild state
+   * Note: Port tracking is now handled by PortRegistry which syncs from Docker on startup
    */
   private async scanExistingPreviewContainers(): Promise<void> {
     try {
@@ -114,6 +116,9 @@ export class PreviewBuildService {
       const previewContainers = containers.filter(c =>
         c.Names.some(name => name.includes('/preview-'))
       );
+
+      let cleanedCount = 0;
+      let runningCount = 0;
 
       for (const container of previewContainers) {
         // Clean up orphaned containers (Created state but not running)
@@ -125,26 +130,23 @@ export class PreviewBuildService {
             });
             const orphanContainer = this.docker.getContainer(container.Id);
             await orphanContainer.remove({ force: true });
+            cleanedCount++;
           } catch (removeError) {
             logger.warn('⚠️  Failed to remove orphan container', { error: removeError });
           }
           continue;
         }
 
-        // Track ports from running containers
-        if (container.Ports) {
-          for (const portMapping of container.Ports) {
-            if (portMapping.PublicPort && portMapping.PublicPort >= this.basePort) {
-              this.allocatedPorts.add(portMapping.PublicPort);
-            }
-          }
+        if (container.State === 'running') {
+          runningCount++;
         }
       }
 
       if (previewContainers.length > 0) {
         logger.info('🔍 Scanned existing preview containers', {
-          count: previewContainers.length,
-          allocatedPorts: Array.from(this.allocatedPorts).sort((a, b) => a - b),
+          total: previewContainers.length,
+          running: runningCount,
+          cleaned: cleanedCount,
         });
       }
     } catch (error) {
@@ -164,12 +166,11 @@ export class PreviewBuildService {
       );
 
       if (previewContainer) {
-        // Extract port from the container
-        let port = this.basePort;
+        // Extract port from the container - port is already tracked by PortRegistry
+        let port = 31000; // Default, will be overwritten
         for (const portMapping of previewContainer.Ports || []) {
           if (portMapping.PublicPort && portMapping.PrivatePort === 3000) {
             port = portMapping.PublicPort;
-            this.allocatedPorts.add(port);
             break;
           }
         }
@@ -347,13 +348,15 @@ export class PreviewBuildService {
         const container = this.docker.getContainer(dbResult.rows[0].preview_container_id);
         const info = await container.inspect();
         if (info.State.Running) {
+          // Use existing port from database, or get allocated port from PortRegistry
+          const existingPort = dbResult.rows[0].preview_port || 31000;
           const previewContainer: PreviewContainer = {
             containerId: dbResult.rows[0].preview_container_id,
             dockerId: info.Id,
             projectId,
-            port: dbResult.rows[0].preview_port || this.allocatePort(),
+            port: existingPort,
             status: 'running',
-            previewUrl: `http://localhost:${dbResult.rows[0].preview_port || 31000}`,
+            previewUrl: `http://localhost:${existingPort}`,
           };
           this.previewContainers.set(projectId, previewContainer);
           return previewContainer;
@@ -371,8 +374,8 @@ export class PreviewBuildService {
    * Create a new preview container
    */
   private async createPreviewContainer(projectId: string): Promise<PreviewContainer> {
-    const port = this.allocatePort();
     const containerId = `preview-${projectId}-${Date.now()}`;
+    const port = await this.allocatePort(projectId, containerId);
     const traefikHost = `${projectId}.dev.musical.run`;
 
     logger.info('🐳 Creating preview container', { projectId, containerId, port, traefikHost });
@@ -457,14 +460,19 @@ export class PreviewBuildService {
       };
 
       this.previewContainers.set(projectId, previewContainer);
-      this.allocatedPorts.add(port);
+      // Port is already tracked by PortRegistry from allocatePort() call
 
       logger.info('✅ Preview container created', { containerId, port, traefikUrl: previewContainer.traefikUrl });
 
       return previewContainer;
 
     } catch (error: any) {
-      this.allocatedPorts.delete(port);
+      // Release the port back to PortRegistry on failure
+      if (this.portRegistry) {
+        await this.portRegistry.releasePort(port).catch(e => 
+          logger.warn('Failed to release port on error', { port, error: e })
+        );
+      }
       
       // Cleanup failed container if it exists
       try {
@@ -819,15 +827,17 @@ export class PreviewBuildService {
   }
 
   /**
-   * Allocate an available port
+   * Allocate an available port using the centralized PortRegistry
    */
-  private allocatePort(): number {
-    let port = this.basePort;
-    while (this.allocatedPorts.has(port)) {
-      port++;
+  private async allocatePort(projectId: string, containerId?: string): Promise<number> {
+    if (!this.portRegistry) {
+      this.portRegistry = getPortRegistry();
     }
-    this.allocatedPorts.add(port);
-    return port;
+    return await this.portRegistry.allocatePort({
+      projectId,
+      portType: 'preview_container',
+      containerId,
+    });
   }
 
   /**
@@ -899,9 +909,16 @@ export class PreviewBuildService {
           await container.stop({ t: 10 });
           await container.remove();
           this.previewContainers.delete(projectId);
-          this.allocatedPorts.delete(previewContainer.port);
+          
+          // Release port back to PortRegistry
+          if (this.portRegistry) {
+            await this.portRegistry.releasePort(previewContainer.port).catch(e =>
+              logger.warn('Failed to release port during cleanup', { port: previewContainer.port, error: e })
+            );
+          }
+          
           cleaned++;
-          logger.info('🧹 Cleaned up old preview container', { projectId });
+          logger.info('🧹 Cleaned up old preview container', { projectId, port: previewContainer.port });
         }
       } catch (error) {
         logger.debug('Failed to cleanup container', { projectId, error });

@@ -5,10 +5,9 @@
 
 import { Router, Request, Response } from 'express';
 import { logger } from '../lib/logger';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import Docker from 'dockerode';
 
-const execAsync = promisify(exec);
+const docker = new Docker();
 
 export const servicesRoutes = Router();
 
@@ -207,7 +206,8 @@ servicesRoutes.post('/:name/restart', async (req: Request, res: Response) => {
       });
     }
 
-    await execAsync(`docker restart ${container.id}`);
+    const dockerContainer = docker.getContainer(container.id);
+    await dockerContainer.restart();
     
     logger.info('Service restarted', { name, containerId: container.id });
     
@@ -235,22 +235,19 @@ interface ContainerInfo {
 
 async function getDockerContainers(): Promise<ContainerInfo[]> {
   try {
-    const { stdout } = await execAsync(
-      `docker ps -a --format '{{.ID}}|{{.Names}}|{{.Status}}|{{.Labels}}'`
-    );
+    const containers = await docker.listContainers({ all: true });
+    const result: ContainerInfo[] = [];
     
-    const lines = stdout.trim().split('\n').filter(Boolean);
-    const containers: ContainerInfo[] = [];
-    
-    for (const line of lines) {
-      const [id, name, statusStr, labelsStr] = line.split('|');
-      
+    for (const container of containers) {
       // Parse status
       let status: ContainerInfo['status'] = 'unknown';
       let health: ContainerInfo['health'] = 'unknown';
       let uptime: string | undefined;
       
-      if (statusStr.includes('Up')) {
+      const stateStr = container.State || '';
+      const statusStr = container.Status || '';
+      
+      if (stateStr === 'running') {
         status = 'running';
         // Extract uptime like "Up 2 hours"
         const uptimeMatch = statusStr.match(/Up\s+(.+?)(?:\s+\(|$)/);
@@ -263,34 +260,26 @@ async function getDockerContainers(): Promise<ContainerInfo[]> {
         } else if (statusStr.includes('(unhealthy)')) {
           health = 'unhealthy';
         }
-      } else if (statusStr.includes('Exited')) {
+      } else if (stateStr === 'exited') {
         status = 'stopped';
-      } else if (statusStr.includes('Created') || statusStr.includes('Starting')) {
+      } else if (stateStr === 'created' || stateStr === 'restarting') {
         status = 'starting';
       }
       
-      // Parse labels
-      const labels: Record<string, string> = {};
-      if (labelsStr) {
-        labelsStr.split(',').forEach(label => {
-          const [key, value] = label.split('=');
-          if (key && value) {
-            labels[key] = value;
-          }
-        });
-      }
+      // Get container name (remove leading slash)
+      const name = container.Names[0]?.replace(/^\//, '') || container.Id.substring(0, 12);
       
-      containers.push({
-        id: id.substring(0, 12),
+      result.push({
+        id: container.Id.substring(0, 12),
         name,
         status,
         health,
         uptime,
-        labels,
+        labels: container.Labels || {},
       });
     }
     
-    return containers;
+    return result;
   } catch (error) {
     logger.error('Failed to get Docker containers', { error });
     return [];
@@ -299,11 +288,8 @@ async function getDockerContainers(): Promise<ContainerInfo[]> {
 
 async function getContainerDetails(containerId: string): Promise<any> {
   try {
-    const { stdout } = await execAsync(
-      `docker inspect ${containerId} --format '{{json .}}'`
-    );
-    
-    const info = JSON.parse(stdout);
+    const container = docker.getContainer(containerId);
+    const info = await container.inspect();
     
     return {
       image: info.Config?.Image,
