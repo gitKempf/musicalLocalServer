@@ -166,6 +166,8 @@ export class ContainerOrchestrator {
         `PROJECT_ID=${projectId}`,
         `USER_ID=${userId}`,
         `SESSION_ID=${sessionId}`,
+        `TERM=xterm-256color`,  // Enable proper terminal escape sequences
+        `COLORTERM=truecolor`,  // Enable 24-bit color support
       ];
 
       if (giteaToken) envVars.push(`GITEA_TOKEN=${giteaToken}`);

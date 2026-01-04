@@ -267,6 +267,29 @@ export class InstanceManager {
     }
 
     const composeFile = 'docker-compose.yml';
+    
+    // Clean up any orphaned containers with conflicting names before starting
+    // This prevents "container name already in use" errors from crashed/interrupted sessions
+    const containerNames = [
+      `musical-local-${instanceId}`,
+      `musical-postgres-${instanceId}`,
+      `musical-gitea-${instanceId}`,
+      `musical-claude-agent-${instanceId}`
+    ];
+    
+    for (const name of containerNames) {
+      try {
+        const container = this.docker.getContainer(name);
+        const info = await container.inspect().catch(() => null);
+        if (info && info.State.Status !== 'running') {
+          // Container exists but is not running (Created, Exited, etc.) - remove it
+          console.log(chalk.dim(`  Removing orphaned container: ${name}`));
+          await container.remove({ force: true });
+        }
+      } catch {
+        // Container doesn't exist, which is fine
+      }
+    }
       
     const { stdout, stderr } = await execAsync(
       `cd "${installDir}" && docker compose -f ${composeFile} --project-name musical-${instanceId} up -d`,

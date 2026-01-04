@@ -13,6 +13,257 @@ import db from '../lib/database';
 const router = Router();
 
 /**
+ * Detect common dev server errors from response body
+ * Returns error info if detected, null otherwise
+ */
+interface DevServerError {
+  title: string;
+  message: string;
+  suggestion: string;
+  originalError?: string;
+}
+
+function detectDevServerError(body: string, statusCode: number): DevServerError | null {
+  // Check for HTTP error status codes
+  if (statusCode >= 400 && statusCode < 600) {
+    // Check for specific error patterns in the body
+    
+    // Vite allowedHosts error
+    if (body.includes('Blocked request') && body.includes('allowedHosts')) {
+      const hostMatch = body.match(/This host \("([^"]+)"\)/);
+      const blockedHost = hostMatch ? hostMatch[1] : 'unknown host';
+      return {
+        title: 'Host Not Allowed',
+        message: `The dev server blocked the request because "${blockedHost}" is not in the allowed hosts list.`,
+        suggestion: 'Ask Claude to update vite.config.js and add server.allowedHosts: true',
+        originalError: body.substring(0, 500),
+      };
+    }
+    
+    // Generic 403 Forbidden
+    if (statusCode === 403) {
+      return {
+        title: 'Access Forbidden',
+        message: 'The dev server rejected the request.',
+        suggestion: 'Check the server configuration or ask Claude to fix the issue.',
+        originalError: body.substring(0, 500),
+      };
+    }
+    
+    // 404 Not Found
+    if (statusCode === 404) {
+      return {
+        title: 'Page Not Found',
+        message: 'The requested page or resource was not found.',
+        suggestion: 'Make sure the app is properly built and the route exists.',
+        originalError: body.substring(0, 500),
+      };
+    }
+    
+    // 500 Internal Server Error
+    if (statusCode >= 500) {
+      return {
+        title: 'Server Error',
+        message: 'The dev server encountered an internal error.',
+        suggestion: 'Check the terminal for error details or ask Claude to debug.',
+        originalError: body.substring(0, 500),
+      };
+    }
+  }
+  
+  // Check for error patterns in body even with 200 status (some dev servers do this)
+  
+  // Node.js/npm errors
+  if (body.includes('Error: Cannot find module') || body.includes('MODULE_NOT_FOUND')) {
+    const moduleMatch = body.match(/Cannot find module ['"]([^'"]+)['"]/);
+    const moduleName = moduleMatch ? moduleMatch[1] : 'a module';
+    return {
+      title: 'Missing Module',
+      message: `The app is missing a required dependency: ${moduleName}`,
+      suggestion: 'Ask Claude to install the missing package with npm install.',
+      originalError: body.substring(0, 500),
+    };
+  }
+  
+  // Syntax errors
+  if (body.includes('SyntaxError:') || body.includes('Parsing error:')) {
+    return {
+      title: 'Syntax Error',
+      message: 'There is a syntax error in the code.',
+      suggestion: 'Check the terminal for the exact error location and ask Claude to fix it.',
+      originalError: body.substring(0, 500),
+    };
+  }
+  
+  // Build/compilation errors
+  if (body.includes('Build failed') || body.includes('Compilation failed') || body.includes('Failed to compile')) {
+    return {
+      title: 'Build Failed',
+      message: 'The project failed to build.',
+      suggestion: 'Check the terminal for build errors and ask Claude to fix them.',
+      originalError: body.substring(0, 500),
+    };
+  }
+  
+  // Port already in use
+  if (body.includes('EADDRINUSE') || body.includes('address already in use')) {
+    return {
+      title: 'Port In Use',
+      message: 'The dev server port is already in use.',
+      suggestion: 'Ask Claude to use a different port or stop the other process.',
+      originalError: body.substring(0, 500),
+    };
+  }
+  
+  return null;
+}
+
+/**
+ * Generate a styled HTML error page for dev server errors
+ */
+function generateDevServerErrorPage(error: DevServerError): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Preview Error - ${error.title}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1e1e2e 0%, #2d2d3f 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #e0e0e0;
+    }
+    .error-container {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      padding: 32px;
+      max-width: 500px;
+      width: 100%;
+      text-align: center;
+      backdrop-filter: blur(10px);
+    }
+    .error-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    .error-title {
+      font-size: 24px;
+      font-weight: 600;
+      color: #ff6b6b;
+      margin-bottom: 12px;
+    }
+    .error-message {
+      font-size: 16px;
+      color: #b0b0b0;
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+    .suggestion-box {
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    .suggestion-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: #6366f1;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .suggestion-text {
+      font-size: 14px;
+      color: #e0e0e0;
+    }
+    .details-toggle {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #888;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+    .details-toggle:hover {
+      border-color: rgba(255, 255, 255, 0.4);
+      color: #aaa;
+    }
+    .details-content {
+      display: none;
+      margin-top: 16px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: left;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 11px;
+      color: #888;
+      max-height: 150px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .details-content.show {
+      display: block;
+    }
+    .help-text {
+      margin-top: 20px;
+      font-size: 12px;
+      color: #666;
+    }
+    .help-text a {
+      color: #6366f1;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="error-container">
+    <div class="error-icon">⚠️</div>
+    <h1 class="error-title">${escapeHtml(error.title)}</h1>
+    <p class="error-message">${escapeHtml(error.message)}</p>
+    
+    <div class="suggestion-box">
+      <div class="suggestion-label">💡 How to fix</div>
+      <div class="suggestion-text">${escapeHtml(error.suggestion)}</div>
+    </div>
+    
+    ${error.originalError ? `
+    <button class="details-toggle" onclick="document.querySelector('.details-content').classList.toggle('show')">
+      Show Technical Details
+    </button>
+    <div class="details-content">${escapeHtml(error.originalError)}</div>
+    ` : ''}
+    
+    <p class="help-text">
+      This is a development error from your app.<br>
+      Check the Terminal for more details.
+    </p>
+  </div>
+</body>
+</html>`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/**
  * GET /api/preview/:projectId/*
  * Proxies requests to the preview container for the given project
  */
@@ -77,6 +328,15 @@ router.all('/:projectId/*', async (req: Request, res: Response) => {
           body += chunk;
         });
         proxyRes.on('end', () => {
+          // Check for common dev server errors and show user-friendly error page
+          const devServerError = detectDevServerError(body, proxyRes.statusCode || 200);
+          if (devServerError) {
+            res.status(200); // Return 200 so iframe displays our styled error
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            res.send(generateDevServerErrorPage(devServerError));
+            return;
+          }
+
           // Base URL for this project's preview
           const baseUrl = `/api/preview/${projectId}/`;
           let modifiedBody = body;

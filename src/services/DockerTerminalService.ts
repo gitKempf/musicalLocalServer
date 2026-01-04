@@ -72,9 +72,12 @@ export class DockerTerminalService {
         Tty: true,
         Env: [
           `TERM=xterm-256color`,
+          `COLORTERM=truecolor`,
           `COLUMNS=${options.cols || 80}`,
           `LINES=${options.rows || 24}`,
           `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+          `LANG=en_US.UTF-8`,
+          `LC_ALL=en_US.UTF-8`,
         ],
       });
 
@@ -151,8 +154,9 @@ export class DockerTerminalService {
     }
 
     try {
+      logger.info('📐 Resizing terminal', { sessionId, rows, cols });
       await session.exec.resize({ h: rows, w: cols });
-      logger.debug('📐 Terminal resized', { sessionId, rows, cols });
+      logger.info('✅ Terminal resized successfully', { sessionId, rows, cols });
     } catch (error: any) {
       logger.error('❌ Failed to resize terminal', {
         sessionId,

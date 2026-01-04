@@ -83,6 +83,10 @@
             cursorBlink: true,
             fontSize: 14,
             fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+            convertEol: false,  // Don't convert \n to \r\n - preserve exact PTY output
+            disableStdin: false,
+            screenReaderMode: false,
+            windowsMode: false,  // Disable Windows line ending handling
             theme: {
                 background: '#1e1e1e',
                 foreground: '#d4d4d4',
@@ -160,6 +164,20 @@
 
                     // Hide loading
                     document.getElementById('loading').classList.add('hidden');
+
+                    // Auto-focus terminal so user can start typing immediately
+                    term.focus();
+
+                    // Force fit and resize after connection to sync terminal size
+                    setTimeout(() => {
+                        fitAddon.fit();
+                        // Explicitly send resize after fit
+                        socket.emit('terminal:resize', { 
+                            rows: term.rows, 
+                            cols: term.cols 
+                        });
+                        console.log('📐 Sent initial resize:', { rows: term.rows, cols: term.cols });
+                    }, 100);
 
                     // Notify React Native
                     if (window.ReactNativeWebView) {
@@ -294,6 +312,8 @@
                     term.clear();
                 } else if (message.type === 'terminal:fit') {
                     fitAddon.fit();
+                } else if (message.type === 'terminal:focus') {
+                    term.focus();
                 }
             } catch (err) {
                 // Only log errors for actual terminal messages, not browser noise
