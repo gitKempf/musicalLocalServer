@@ -14,6 +14,10 @@
 #   musical shell <instance>        # Shell into container
 #   musical uninstall <instance>    # Remove an instance
 #
+# Environment Variables:
+#   MUSICAL_INSTALL_DIR    Override installation directory for all instances
+#   MUSICAL_INSTALL_DIR_<INSTANCE>  Override for specific instance (e.g., MUSICAL_INSTALL_DIR_MAIN)
+#
 
 set -e
 
@@ -26,12 +30,73 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Determine docker compose command
 if docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD="docker compose"
 else
     COMPOSE_CMD="docker-compose"
 fi
+
+# Find installation directory for an instance
+# Priority:
+#   1. MUSICAL_INSTALL_DIR_<INSTANCE> environment variable (uppercase instance name)
+#   2. MUSICAL_INSTALL_DIR environment variable
+#   3. Config file: ~/.musical/instances/<instance>/install_dir
+#   4. Script directory (if .env.<instance> exists)
+#   5. $HOME/musical-local-server-<instance>
+#   6. $HOME/musical-local-server (for default instance)
+find_install_dir() {
+    local instance=$1
+    local instance_upper=$(echo "$instance" | tr '[:lower:]-' '[:upper:]_')
+    
+    # 1. Check instance-specific env var (e.g., MUSICAL_INSTALL_DIR_MAIN)
+    local env_var="MUSICAL_INSTALL_DIR_${instance_upper}"
+    local env_value="${!env_var}"
+    if [ -n "$env_value" ] && [ -d "$env_value" ]; then
+        echo "$env_value"
+        return 0
+    fi
+    
+    # 2. Check global env var
+    if [ -n "$MUSICAL_INSTALL_DIR" ] && [ -d "$MUSICAL_INSTALL_DIR" ]; then
+        echo "$MUSICAL_INSTALL_DIR"
+        return 0
+    fi
+    
+    # 3. Check config file
+    local config_dir="$HOME/.musical/instances/${instance}"
+    if [ -f "$config_dir/install_dir" ]; then
+        local dir=$(cat "$config_dir/install_dir")
+        if [ -d "$dir" ]; then
+            echo "$dir"
+            return 0
+        fi
+    fi
+    
+    # 4. Check script directory (for development setups)
+    if [ -f "$SCRIPT_DIR/.env.${instance}" ] || [ -f "$SCRIPT_DIR/.env" -a "$instance" = "default" ]; then
+        echo "$SCRIPT_DIR"
+        return 0
+    fi
+    
+    # 5. Check standard home directory locations
+    if [ -d "$HOME/musical-local-server-${instance}" ]; then
+        echo "$HOME/musical-local-server-${instance}"
+        return 0
+    fi
+    
+    # 6. Default instance in standard location
+    if [ "$instance" = "default" ] && [ -d "$HOME/musical-local-server" ]; then
+        echo "$HOME/musical-local-server"
+        return 0
+    fi
+    
+    # Not found
+    return 1
+}
 
 # Get all Musical instances
 get_instances() {
@@ -162,16 +227,18 @@ cmd_start() {
         return 1
     fi
     
-    # Find install directory
-    local install_dir=""
-    if [ -d "$HOME/musical-local-server-${instance}" ]; then
-        install_dir="$HOME/musical-local-server-${instance}"
-    elif [ -d "$HOME/musical-local-server" ] && [ "$instance" = "default" ]; then
-        install_dir="$HOME/musical-local-server"
-    else
+    # Find install directory using configurable search
+    local install_dir
+    install_dir=$(find_install_dir "$instance") || {
         echo -e "${RED}Cannot find installation directory for instance '$instance'${NC}"
+        echo ""
+        echo "You can specify the directory by:"
+        echo "  1. Setting MUSICAL_INSTALL_DIR_${instance^^} environment variable"
+        echo "  2. Setting MUSICAL_INSTALL_DIR environment variable"
+        echo "  3. Creating ~/.musical/instances/${instance}/install_dir file"
+        echo "  4. Running from the installation directory"
         return 1
-    fi
+    }
     
     cd "$install_dir"
     export INSTANCE_ID="$instance"
@@ -202,15 +269,47 @@ cmd_stop() {
 
 cmd_restart() {
     local instance=$1
+    local force_recreate=${2:-false}
     
     if [ -z "$instance" ]; then
-        echo "Usage: musical restart <instance>"
+        echo "Usage: musical restart <instance> [--force]"
+        echo ""
+        echo "Options:"
+        echo "  --force    Force recreate containers (picks up .env changes)"
         return 1
     fi
     
-    cmd_stop "$instance"
-    sleep 2
-    cmd_start "$instance"
+    # Check for --force flag
+    if [ "$2" = "--force" ] || [ "$2" = "-f" ]; then
+        force_recreate=true
+    fi
+    
+    if [ "$force_recreate" = true ]; then
+        echo -e "${CYAN}Force recreating instance '$instance' (will pick up .env changes)...${NC}"
+        cmd_recreate "$instance"
+    else
+        # Standard restart using docker-compose (preserves env vars)
+        local install_dir
+        install_dir=$(find_install_dir "$instance") || {
+            echo -e "${RED}Cannot find installation directory for instance '$instance'${NC}"
+            return 1
+        }
+        
+        cd "$install_dir"
+        export INSTANCE_ID="$instance"
+        
+        local env_file=".env.${instance}"
+        [ ! -f "$env_file" ] && env_file=".env"
+        
+        local compose_file="docker-compose.instance.yml"
+        [ ! -f "$compose_file" ] && compose_file="docker-compose.user.yml"
+        [ ! -f "$compose_file" ] && compose_file="docker-compose.yml"
+        
+        echo -e "${CYAN}Restarting instance '$instance'...${NC}"
+        $COMPOSE_CMD -f "$compose_file" --project-name "musical-${instance}" --env-file "$env_file" restart
+        
+        echo -e "${GREEN}Instance '$instance' restarted${NC}"
+    fi
 }
 
 cmd_logs() {
@@ -285,13 +384,9 @@ cmd_uninstall() {
     echo "Removing network..."
     docker network rm "musical-network-${instance}" 2>/dev/null || true
     
-    # Remove install directory
-    local install_dir=""
-    if [ -d "$HOME/musical-local-server-${instance}" ]; then
-        install_dir="$HOME/musical-local-server-${instance}"
-    elif [ -d "$HOME/musical-local-server" ] && [ "$instance" = "default" ]; then
-        install_dir="$HOME/musical-local-server"
-    fi
+    # Remove install directory using configurable search
+    local install_dir
+    install_dir=$(find_install_dir "$instance") || install_dir=""
     
     if [ -n "$install_dir" ] && [ -d "$install_dir" ]; then
         read -p "Remove installation directory $install_dir? (y/N) " -n 1 -r
@@ -311,6 +406,143 @@ cmd_uninstall() {
     echo -e "${GREEN}Instance '$instance' uninstalled${NC}"
 }
 
+cmd_verify() {
+    local instance=$1
+    
+    if [ -z "$instance" ]; then
+        echo "Usage: musical verify <instance>"
+        return 1
+    fi
+    
+    echo -e "${BOLD}Verifying instance: ${CYAN}$instance${NC}"
+    echo ""
+    
+    local install_dir
+    install_dir=$(find_install_dir "$instance") || {
+        echo -e "${RED}Cannot find installation directory for instance '$instance'${NC}"
+        return 1
+    }
+    
+    local env_file="$install_dir/.env.${instance}"
+    [ ! -f "$env_file" ] && env_file="$install_dir/.env"
+    
+    if [ ! -f "$env_file" ]; then
+        echo -e "${RED}Environment file not found${NC}"
+        return 1
+    fi
+    
+    echo -e "${BOLD}1. Checking credential consistency...${NC}"
+    
+    # Get expected DB_PASSWORD from .env file
+    local expected_db_pass=$(grep '^DB_PASSWORD=' "$env_file" | cut -d= -f2)
+    
+    # Get actual DB_PASSWORD from local-server container
+    local local_db_pass=$(docker exec "musical-local-${instance}" printenv DB_PASSWORD 2>/dev/null || echo "CONTAINER_NOT_RUNNING")
+    
+    # Get actual GITEA__database__PASSWD from gitea container  
+    local gitea_db_pass=$(docker exec "musical-gitea-${instance}" printenv GITEA__database__PASSWD 2>/dev/null || echo "CONTAINER_NOT_RUNNING")
+    
+    local has_issues=false
+    
+    if [ "$local_db_pass" = "CONTAINER_NOT_RUNNING" ]; then
+        echo -e "  ${YELLOW}⚠ Local server not running${NC}"
+    elif [ "$local_db_pass" != "$expected_db_pass" ]; then
+        echo -e "  ${RED}✗ Local server DB_PASSWORD mismatch${NC}"
+        echo -e "    Expected: ${expected_db_pass:0:8}..."
+        echo -e "    Actual:   ${local_db_pass:0:8}..."
+        has_issues=true
+    else
+        echo -e "  ${GREEN}✓ Local server credentials OK${NC}"
+    fi
+    
+    if [ "$gitea_db_pass" = "CONTAINER_NOT_RUNNING" ]; then
+        echo -e "  ${YELLOW}⚠ Gitea not running${NC}"
+    elif [ "$gitea_db_pass" != "$expected_db_pass" ]; then
+        echo -e "  ${RED}✗ Gitea DB password mismatch!${NC}"
+        echo -e "    Expected: ${expected_db_pass:0:8}..."
+        echo -e "    Actual:   ${gitea_db_pass:0:8}..."
+        has_issues=true
+    else
+        echo -e "  ${GREEN}✓ Gitea credentials OK${NC}"
+    fi
+    
+    echo ""
+    echo -e "${BOLD}2. Checking service connectivity...${NC}"
+    
+    # Check if Gitea can connect to Postgres
+    local gitea_db_check=$(docker exec "musical-gitea-${instance}" curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/v1/version 2>/dev/null || echo "000")
+    if [ "$gitea_db_check" = "200" ]; then
+        echo -e "  ${GREEN}✓ Gitea API responding${NC}"
+    else
+        echo -e "  ${RED}✗ Gitea API not responding (HTTP $gitea_db_check)${NC}"
+        has_issues=true
+    fi
+    
+    # Check local-server health
+    local port=$(docker port "musical-local-${instance}" 17100/tcp 2>/dev/null | cut -d: -f2)
+    if [ -n "$port" ]; then
+        local health=$(curl -s "http://localhost:${port}/health" 2>/dev/null)
+        if echo "$health" | grep -q '"status":"healthy"'; then
+            echo -e "  ${GREEN}✓ Local server healthy${NC}"
+        else
+            echo -e "  ${RED}✗ Local server unhealthy${NC}"
+            has_issues=true
+        fi
+    fi
+    
+    echo ""
+    
+    if [ "$has_issues" = true ]; then
+        echo -e "${YELLOW}Issues detected! Run the following to fix:${NC}"
+        echo -e "  ${CYAN}musical recreate $instance${NC}"
+        return 1
+    else
+        echo -e "${GREEN}All checks passed!${NC}"
+        return 0
+    fi
+}
+
+cmd_recreate() {
+    local instance=$1
+    
+    if [ -z "$instance" ]; then
+        echo "Usage: musical recreate <instance>"
+        echo ""
+        echo "Recreates containers with fresh environment variables from .env file."
+        echo "Use this after modifying .env.$instance to apply changes."
+        return 1
+    fi
+    
+    local install_dir
+    install_dir=$(find_install_dir "$instance") || {
+        echo -e "${RED}Cannot find installation directory for instance '$instance'${NC}"
+        return 1
+    }
+    
+    cd "$install_dir"
+    export INSTANCE_ID="$instance"
+    
+    local env_file=".env.${instance}"
+    [ ! -f "$env_file" ] && env_file=".env"
+    
+    local compose_file="docker-compose.instance.yml"
+    [ ! -f "$compose_file" ] && compose_file="docker-compose.user.yml"
+    [ ! -f "$compose_file" ] && compose_file="docker-compose.yml"
+    
+    echo -e "${CYAN}Recreating containers for instance '$instance' with fresh environment...${NC}"
+    echo ""
+    
+    # Force recreate to pick up new environment variables
+    $COMPOSE_CMD -f "$compose_file" --project-name "musical-${instance}" --env-file "$env_file" up -d --force-recreate
+    
+    echo ""
+    echo -e "${GREEN}Instance '$instance' recreated with fresh environment${NC}"
+    echo ""
+    echo "Verifying..."
+    sleep 5
+    cmd_verify "$instance"
+}
+
 cmd_help() {
     cat << EOF
 Musical.run Local Server - Instance Manager
@@ -322,7 +554,9 @@ Commands:
   status [instance]       Show status of instance(s)
   start <instance>        Start an instance
   stop <instance>         Stop an instance
-  restart <instance>      Restart an instance
+  restart <instance>      Restart an instance (use --force to pick up .env changes)
+  recreate <instance>     Force recreate containers with fresh environment
+  verify <instance>       Check credential consistency across services
   logs <instance> [svc]   View logs (svc: local, postgres, gitea, claude)
   shell <instance>        Shell into local-server container
   uninstall <instance>    Remove an instance completely
@@ -331,8 +565,23 @@ Examples:
   musical list
   musical status home
   musical start work
+  musical restart home --force     # Apply .env changes
+  musical verify home              # Check credentials match
+  musical recreate home            # Force recreate all containers
   musical logs home claude
   musical uninstall old-instance
+
+Environment Variables:
+  MUSICAL_INSTALL_DIR           Override installation directory for all instances
+  MUSICAL_INSTALL_DIR_<NAME>    Override for specific instance (uppercase, e.g., MUSICAL_INSTALL_DIR_MAIN)
+
+Installation Directory Search Order:
+  1. MUSICAL_INSTALL_DIR_<INSTANCE> environment variable
+  2. MUSICAL_INSTALL_DIR environment variable  
+  3. ~/.musical/instances/<instance>/install_dir file
+  4. Script directory (if .env.<instance> exists)
+  5. ~/musical-local-server-<instance>
+  6. ~/musical-local-server (for default instance)
 
 Instance Isolation:
   Each instance runs in its own Docker network with isolated:
@@ -340,6 +589,10 @@ Instance Isolation:
   - Volumes (musical-*-data-<instance>)
   - Network (musical-network-<instance>)
   - Ports (configured during installation)
+
+Credential Management:
+  After modifying .env.<instance>, use 'recreate' or 'restart --force' 
+  to apply changes. Use 'verify' to check all services have matching credentials.
 EOF
 }
 
@@ -358,7 +611,13 @@ case "${1:-}" in
         cmd_stop "$2"
         ;;
     restart)
-        cmd_restart "$2"
+        cmd_restart "$2" "$3"
+        ;;
+    recreate)
+        cmd_recreate "$2"
+        ;;
+    verify|check)
+        cmd_verify "$2"
         ;;
     logs|log)
         cmd_logs "$2" "$3"

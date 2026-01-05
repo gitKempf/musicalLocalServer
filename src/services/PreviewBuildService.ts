@@ -609,6 +609,131 @@ export class PreviewBuildService {
   }
 
   /**
+   * Configure Vite to allow all hosts when behind a proxy
+   * 
+   * This is critical for tunnel-based preview access. Vite 5+ enforces
+   * allowedHosts security by default, blocking requests from unknown hosts.
+   * When requests come through cloudflare tunnel → local server → container,
+   * Vite may see the container name or proxy hostname instead of localhost.
+   * 
+   * We solve this by:
+   * 1. Patching vite.config.js to add server.allowedHosts: true
+   * 2. Setting __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS env var as backup
+   */
+  private async configureViteAllowedHosts(container: Docker.Container): Promise<void> {
+    try {
+      // Check if this is a Vite project
+      const checkViteResult = await this.execInContainer(container, `
+        cd /app && 
+        ([ -f vite.config.js ] || [ -f vite.config.ts ] || [ -f vite.config.mjs ] || [ -f vite.config.mts ]) && echo "vite" || 
+        (grep -q "vite" package.json 2>/dev/null && echo "vite-dep") || 
+        echo "not-vite"
+      `);
+
+      const projectType = checkViteResult.stdout.trim();
+      
+      if (projectType === 'not-vite') {
+        logger.debug('Not a Vite project, skipping allowedHosts configuration');
+        return;
+      }
+
+      logger.info('🔧 Configuring Vite allowedHosts for proxy access');
+
+      // Strategy 1: Patch existing vite.config.js to add allowedHosts
+      // This handles cases where config already exists
+      const configFileName = await this.execInContainer(container, `
+        cd /app &&
+        if [ -f vite.config.ts ]; then echo "vite.config.ts";
+        elif [ -f vite.config.mts ]; then echo "vite.config.mts";
+        elif [ -f vite.config.js ]; then echo "vite.config.js";
+        elif [ -f vite.config.mjs ]; then echo "vite.config.mjs";
+        else echo "none"; fi
+      `);
+
+      const configFile = configFileName.stdout.trim();
+
+      if (configFile !== 'none') {
+        // Read the existing config
+        const readResult = await this.execInContainer(container, `cat /app/${configFile}`);
+        let configContent = readResult.stdout;
+
+        // Check if allowedHosts is already configured
+        if (configContent.includes('allowedHosts')) {
+          logger.debug('Vite config already has allowedHosts, skipping patch');
+        } else {
+          // Patch the config to add server.allowedHosts: true
+          // Handle both cases: server block exists or doesn't exist
+          
+          if (configContent.includes('server:') || configContent.includes('server :')) {
+            // Server block exists - add allowedHosts inside it
+            // Insert after 'server: {' or 'server : {'
+            configContent = configContent.replace(
+              /server\s*:\s*\{/,
+              'server: {\n    allowedHosts: true,'
+            );
+          } else if (configContent.includes('defineConfig(')) {
+            // No server block - add one with allowedHosts
+            // Insert before the closing }) of defineConfig
+            configContent = configContent.replace(
+              /defineConfig\s*\(\s*\{/,
+              'defineConfig({\n  server: {\n    allowedHosts: true,\n  },'
+            );
+          } else {
+            // Fallback: create a simple config file that should work
+            logger.info('Creating minimal Vite config with allowedHosts');
+            configContent = `
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  server: {
+    allowedHosts: true,
+    host: '0.0.0.0',
+  },
+});
+`;
+          }
+
+          // Write the patched config
+          // Use base64 encoding to safely write the file content
+          const base64Content = Buffer.from(configContent).toString('base64');
+          await this.execInContainer(container, `
+            echo '${base64Content}' | base64 -d > /app/${configFile}
+          `);
+          
+          logger.info('✅ Patched Vite config with allowedHosts: true');
+        }
+      } else if (projectType === 'vite-dep') {
+        // Vite is a dependency but no config file exists
+        // Create a minimal vite.config.js
+        logger.info('Creating Vite config for project without one');
+        
+        const viteConfig = `
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  server: {
+    allowedHosts: true,
+    host: '0.0.0.0',
+    port: 3000,
+  },
+});
+`;
+        const base64Content = Buffer.from(viteConfig).toString('base64');
+        await this.execInContainer(container, `
+          echo '${base64Content}' | base64 -d > /app/vite.config.js
+        `);
+        logger.info('✅ Created Vite config with allowedHosts: true');
+      }
+
+    } catch (error: any) {
+      // Don't fail the build if config patching fails - the env var fallback may still work
+      logger.warn('⚠️  Failed to configure Vite allowedHosts, trying env var fallback', {
+        error: error.message,
+      });
+    }
+  }
+
+  /**
    * Start preview server based on project type
    */
   private async startPreviewServer(previewContainer: PreviewContainer): Promise<string> {
@@ -626,6 +751,10 @@ export class PreviewBuildService {
     // Wait a moment
     await new Promise(resolve => setTimeout(resolve, 1000));
 
+    // Configure Vite to allow all hosts when behind a proxy
+    // This is critical for tunnel-based preview access
+    await this.configureViteAllowedHosts(container);
+
     // Detect and start appropriate server
     const detectResult = await this.execInContainer(container, `
       cd /app &&
@@ -642,23 +771,28 @@ export class PreviewBuildService {
 
     const serverType = detectResult.stdout.trim();
 
+    // Environment variables for Vite to allow all hosts through proxy
+    // __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS is a Vite internal env var
+    // that adds additional allowed hosts without requiring config changes
+    const viteEnvVars = '__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=true';
+
     // Start server in background
     switch (serverType) {
       case 'npm-dev':
         await this.execInContainer(container, `
-          cd /app && nohup npm run dev -- --host 0.0.0.0 --port 3000 > /tmp/server.log 2>&1 &
+          cd /app && ${viteEnvVars} nohup npm run dev -- --host 0.0.0.0 --port 3000 > /tmp/server.log 2>&1 &
         `);
         break;
 
       case 'npm-start':
         await this.execInContainer(container, `
-          cd /app && PORT=3000 nohup npm start > /tmp/server.log 2>&1 &
+          cd /app && ${viteEnvVars} PORT=3000 nohup npm start > /tmp/server.log 2>&1 &
         `);
         break;
 
       case 'npm-web':
         await this.execInContainer(container, `
-          cd /app && nohup npm run web -- --port 3000 > /tmp/server.log 2>&1 &
+          cd /app && ${viteEnvVars} nohup npm run web -- --port 3000 > /tmp/server.log 2>&1 &
         `);
         break;
 

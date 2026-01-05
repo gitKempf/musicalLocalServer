@@ -111,6 +111,14 @@ if git commit -m "$COMMIT_MSG" 2>/dev/null; then
     else
         log "⚠️ Could not push to remote (continuing anyway)"
     fi
+    
+    # Call preview verification hook
+    SCRIPT_DIR="$(dirname "$0")"
+    VERIFY_SCRIPT="$SCRIPT_DIR/verify-preview.sh"
+    if [ -f "$VERIFY_SCRIPT" ] && [ -x "$VERIFY_SCRIPT" ]; then
+        log "🔍 Running preview verification..."
+        echo "$INPUT" | "$VERIFY_SCRIPT"
+    fi
 else
     log "⚠️ Commit failed (possibly nothing to commit)"
 fi

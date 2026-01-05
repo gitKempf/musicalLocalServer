@@ -36,6 +36,8 @@ npm run test:coverage
 ```
 __tests__/
 ├── setup.ts                           # Global test setup
+├── cli/                               # CLI tests (bash)
+│   └── musical-cli.test.sh            # Musical CLI test suite
 ├── unit/                              # Unit tests (20 tests)
 │   └── EncryptionService.test.ts
 ├── integration/                       # Integration tests (49 tests)
@@ -44,6 +46,27 @@ __tests__/
 └── e2e/                               # E2E tests
     └── encrypted-communication.test.ts
 ```
+
+## CLI Tests
+
+The `musical` CLI has its own bash test suite:
+
+```bash
+# Run all CLI tests
+./__tests__/cli/musical-cli.test.sh
+
+# Run unit tests only (no Docker required)
+./__tests__/cli/musical-cli.test.sh --unit
+
+# Run integration tests only (requires Docker)
+./__tests__/cli/musical-cli.test.sh --integration
+```
+
+### CLI Test Coverage
+
+- **Unit Tests**: Command parsing, help text, argument validation
+- **Integration Tests**: Docker interaction, instance status, verify command
+- **Environment Variable Tests**: Install directory resolution
 
 ## What Each Test Suite Tests
 

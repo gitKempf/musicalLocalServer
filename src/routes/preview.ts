@@ -506,6 +506,8 @@ router.get('/:projectId', async (req: Request, res: Response) => {
       hasPreview: !!project.preview_container_id,
       previewUrl: project.preview_url,
       previewContainerId: project.preview_container_id,
+      projectType: project.project_type,
+      previewStatus: project.preview_status,
       // The proxy URL that can be used from the frontend
       proxyUrl: project.preview_container_id 
         ? `/api/preview/${projectId}/` 

@@ -11,6 +11,7 @@ import { servicesRoutes } from './services';
 import terminalRoutes from './terminal';
 import webhookRoutes from './webhook';
 import previewRoutes from './preview';
+import previewVerificationRoutes from './previewVerification';
 
 export function setupRoutes(app: Application): void {
   // API routes
@@ -21,6 +22,9 @@ export function setupRoutes(app: Application): void {
   app.use('/api/services', servicesRoutes);
   app.use('/api/terminal', terminalRoutes);
   app.use('/api/webhook', webhookRoutes);
+  // Preview verification routes MUST come before preview proxy routes
+  // because they have specific paths like /verify, /detect-type, etc.
+  app.use('/api/preview', previewVerificationRoutes);
   app.use('/api/preview', previewRoutes);
 
   // Root endpoint
