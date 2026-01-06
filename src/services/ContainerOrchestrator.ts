@@ -337,11 +337,16 @@ ${settingsJson}
 SETTINGS_EOF
       `);
 
-      // Create commit-on-stop.sh hook script
+      // Create commit-on-stop.sh hook script with authenticated push support
       const commitOnStopScript = `#!/bin/bash
 ################################################################################
 # Stop Hook - Commit when Claude finishes inference
 ################################################################################
+
+# Source credentials file if available (for containers without env vars)
+if [ -f /root/.gitea-credentials ]; then
+    source /root/.gitea-credentials
+fi
 
 # Read JSON input from stdin
 INPUT=\$(cat)
@@ -411,13 +416,33 @@ if git commit -m "\$COMMIT_MSG" 2>/dev/null; then
     log "✅ Changes committed"
     echo "✅ Changes committed"
     
-    # Push to remote
+    # Push to remote with authentication
     CURRENT_BRANCH=\$(git branch --show-current 2>/dev/null || echo "main")
+    
+    # Try using git push directly (should work if URL rewrite is configured)
     if git push origin "\$CURRENT_BRANCH" 2>/dev/null; then
         log "✅ Pushed to remote"
         echo "✅ Pushed to remote"
     else
-        log "⚠️ Could not push to remote"
+        # Fallback: try building authenticated URL from environment
+        if [ -n "\$GITEA_TOKEN" ] && [ -n "\$GITEA_URL" ]; then
+            REMOTE_URL=\$(git remote get-url origin 2>/dev/null)
+            if [ -n "\$REMOTE_URL" ]; then
+                REPO_PATH=\$(echo "\$REMOTE_URL" | sed -E 's|^https?://[^/]+||')
+                GITEA_HOST=\$(echo "\$GITEA_URL" | sed -E 's|^https?://||')
+                PUSH_USER=\${GITEA_USERNAME:-\${GITEA_USER:-musical}}
+                AUTH_URL="http://\${PUSH_USER}:\${GITEA_TOKEN}@\${GITEA_HOST}\${REPO_PATH}"
+                
+                if git push "\$AUTH_URL" "\$CURRENT_BRANCH" 2>/dev/null; then
+                    log "✅ Pushed to remote (with auth URL)"
+                    echo "✅ Pushed to remote"
+                else
+                    log "⚠️ Could not push to remote"
+                fi
+            fi
+        else
+            log "⚠️ Could not push to remote - no credentials available"
+        fi
     fi
 else
     log "⚠️ No changes to commit"
@@ -438,6 +463,11 @@ HOOK_EOF
 ################################################################################
 # SessionEnd Hook - Final commit when session ends
 ################################################################################
+
+# Source credentials file if available
+if [ -f /root/.gitea-credentials ]; then
+    source /root/.gitea-credentials
+fi
 
 INPUT=\$(cat)
 
@@ -493,8 +523,29 @@ if git commit -m "\$COMMIT_MSG" 2>/dev/null; then
     log "✅ Final session commit created"
     
     CURRENT_BRANCH=\$(git branch --show-current 2>/dev/null || echo "main")
+    
+    # Try push directly (should work with URL rewrite)
     if git push origin "\$CURRENT_BRANCH" 2>/dev/null; then
         log "✅ Pushed to remote"
+    else
+        # Fallback: try building authenticated URL
+        if [ -n "\$GITEA_TOKEN" ] && [ -n "\$GITEA_URL" ]; then
+            REMOTE_URL=\$(git remote get-url origin 2>/dev/null)
+            if [ -n "\$REMOTE_URL" ]; then
+                REPO_PATH=\$(echo "\$REMOTE_URL" | sed -E 's|^https?://[^/]+||')
+                GITEA_HOST=\$(echo "\$GITEA_URL" | sed -E 's|^https?://||')
+                PUSH_USER=\${GITEA_USERNAME:-\${GITEA_USER:-musical}}
+                AUTH_URL="http://\${PUSH_USER}:\${GITEA_TOKEN}@\${GITEA_HOST}\${REPO_PATH}"
+                
+                if git push "\$AUTH_URL" "\$CURRENT_BRANCH" 2>/dev/null; then
+                    log "✅ Pushed to remote (with auth URL)"
+                else
+                    log "⚠️ Could not push to remote"
+                fi
+            fi
+        else
+            log "⚠️ Could not push to remote - no credentials"
+        fi
     fi
 fi
 
@@ -567,6 +618,18 @@ HOOK_EOF
         await this.execInContainer(container, `
           git config --global url."http://${options.giteaUser}:${options.giteaToken}@${giteaHost}/".insteadOf "http://${giteaHost}/"
         `);
+
+        // Add fallback URL rewrite for "gitea:3000" (legacy/alternate hostname)
+        await this.execInContainer(container, `
+          git config --global url."http://${options.giteaUser}:${options.giteaToken}@${giteaHost}/".insteadOf "http://gitea:3000/"
+        `);
+
+        // Create credentials file for hooks to source (fallback for env vars)
+        await this.execInContainer(container, `
+          echo 'export GITEA_TOKEN=${options.giteaToken}
+export GITEA_URL=http://${giteaHost}
+export GITEA_USERNAME=${options.giteaUser}' > /root/.gitea-credentials && chmod 600 /root/.gitea-credentials
+        `);
         
         logger.info('✅ Git credentials configured for Gitea', { giteaUser: options.giteaUser });
       }
@@ -589,6 +652,81 @@ HOOK_EOF
     } catch (error) {
       logger.warn('⚠️  Git setup warning (non-fatal)', { error });
       // Don't fail container creation if Git setup fails
+    }
+  }
+
+  /**
+   * Ensure Git credentials are configured in a container
+   * This is called both during container creation and when reusing existing containers
+   * to ensure credentials are always available for the stop hook to push
+   */
+  async ensureGitCredentials(containerId: string): Promise<void> {
+    const giteaToken = process.env.GITEA_TOKEN;
+    const giteaUser = process.env.GITEA_USERNAME || process.env.GITEA_ADMIN_USER || 'musical';
+
+    if (!giteaToken) {
+      logger.warn('⚠️  GITEA_TOKEN not available, skipping credential setup');
+      return;
+    }
+
+    logger.info('🔑 Ensuring Git credentials are configured', { containerId, giteaUser });
+
+    try {
+      // Get the container - first try from our map, then directly from Docker
+      let container: Docker.Container;
+      const containerInfo = this.containers.get(containerId);
+      
+      if (containerInfo) {
+        container = this.docker.getContainer(containerInfo.dockerId);
+      } else {
+        // Container might exist but not be in our map (e.g., from previous server run)
+        container = this.docker.getContainer(containerId);
+      }
+
+      // Check if container is running
+      const inspection = await container.inspect();
+      if (!inspection.State.Running) {
+        logger.warn('⚠️  Container not running, skipping credential setup', { containerId });
+        return;
+      }
+
+      const giteaHost = this.giteaUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+
+      // Set up git-credentials file
+      await this.execInContainer(container, `
+        echo "http://${giteaUser}:${giteaToken}@${giteaHost}" > /root/.git-credentials &&
+        chmod 600 /root/.git-credentials
+      `);
+
+      // Configure credential helper
+      await this.execInContainer(container, `
+        git config --global credential.helper 'store --file=/root/.git-credentials'
+      `);
+
+      // Set up URL rewrites for all common Gitea hostnames
+      await this.execInContainer(container, `
+        git config --global url."http://${giteaUser}:${giteaToken}@${giteaHost}/".insteadOf "http://${giteaHost}/"
+      `);
+
+      // Add fallback for "gitea:3000" hostname (legacy/alternate)
+      await this.execInContainer(container, `
+        git config --global url."http://${giteaUser}:${giteaToken}@${giteaHost}/".insteadOf "http://gitea:3000/"
+      `);
+
+      // Create credentials file for hooks to source (fallback for env vars)
+      await this.execInContainer(container, `
+        echo 'export GITEA_TOKEN=${giteaToken}
+export GITEA_URL=http://${giteaHost}
+export GITEA_USERNAME=${giteaUser}' > /root/.gitea-credentials && chmod 600 /root/.gitea-credentials
+      `);
+
+      logger.info('✅ Git credentials configured successfully', { containerId, giteaUser });
+    } catch (error: any) {
+      logger.warn('⚠️  Failed to configure Git credentials (non-fatal)', {
+        containerId,
+        error: error.message,
+      });
+      // Don't fail - credentials may work from environment variables
     }
   }
 

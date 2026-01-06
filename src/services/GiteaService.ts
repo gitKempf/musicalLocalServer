@@ -299,8 +299,9 @@ export class GiteaService {
 
       return { commits };
     } catch (error: any) {
-      if (error.response?.status === 404) {
-        logger.warn('⚠️  Repository not found or no commits', { repoName });
+      // Handle 404 (repo not found) or 409 (empty repository - no commits yet)
+      if (error.response?.status === 404 || error.response?.status === 409) {
+        logger.debug('📜 Repository has no commits yet', { repoName, status: error.response?.status });
         return { commits: [] };
       }
       logger.error('❌ Failed to get commits', {
@@ -338,7 +339,8 @@ export class GiteaService {
         timestamp: commit.commit?.author?.date || commit.created || new Date().toISOString(),
       };
     } catch (error: any) {
-      if (error.response?.status === 404) {
+      // Handle 404 (not found) or 409 (empty repository)
+      if (error.response?.status === 404 || error.response?.status === 409) {
         return null;
       }
       logger.error('❌ Failed to get commit', {

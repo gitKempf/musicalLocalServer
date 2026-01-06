@@ -105,6 +105,16 @@ sessionRoutes.post('/create', requireAuth, async (req, res) => {
             containerId: project.container_id,
           });
 
+          // Ensure Git credentials are configured (may have been lost on container restart)
+          try {
+            await containerOrchestrator.ensureGitCredentials(project.container_id);
+          } catch (error: any) {
+            logger.warn('⚠️  Failed to ensure Git credentials (non-fatal)', {
+              projectId,
+              error: error.message,
+            });
+          }
+
           // Reuse existing container
           containerInfo = {
             containerId: project.container_id,
@@ -122,6 +132,16 @@ sessionRoutes.post('/create', requireAuth, async (req, res) => {
 
           try {
             await containerOrchestrator.startContainer(project.container_id);
+
+            // Ensure Git credentials are configured after restart
+            try {
+              await containerOrchestrator.ensureGitCredentials(project.container_id);
+            } catch (credError: any) {
+              logger.warn('⚠️  Failed to ensure Git credentials after restart (non-fatal)', {
+                projectId,
+                error: credError.message,
+              });
+            }
 
             // Reuse restarted container
             containerInfo = {

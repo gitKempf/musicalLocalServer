@@ -6,6 +6,11 @@
 # Purpose: Create a git commit after each complete inference series
 ################################################################################
 
+# Source credentials file if available (for containers without env vars)
+if [ -f /root/.gitea-credentials ]; then
+    source /root/.gitea-credentials
+fi
+
 # Read JSON input from stdin
 INPUT=$(cat)
 
@@ -105,11 +110,44 @@ if git commit -m "$COMMIT_MSG" 2>/dev/null; then
     
     # Try to push (non-blocking)
     CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
-    if git push origin "$CURRENT_BRANCH" 2>/dev/null; then
-        log "✅ Pushed to remote"
-        echo "✅ Pushed to remote"
+    
+    # Configure git credentials if GITEA_TOKEN is available
+    if [ -n "$GITEA_TOKEN" ] && [ -n "$GITEA_URL" ]; then
+        # Get current remote URL
+        REMOTE_URL=$(git remote get-url origin 2>/dev/null)
+        
+        if [ -n "$REMOTE_URL" ]; then
+            # Extract the path part (e.g., /musical/project_xxx.git)
+            REPO_PATH=$(echo "$REMOTE_URL" | sed -E 's|^https?://[^/]+||')
+            
+            # Build authenticated URL: http://username:token@host:port/path
+            # Extract host and port from GITEA_URL
+            GITEA_HOST=$(echo "$GITEA_URL" | sed -E 's|^https?://||')
+            GITEA_USER=${GITEA_USERNAME:-${GITEA_USER:-musical}}
+            
+            # Create authenticated URL
+            AUTH_URL="http://${GITEA_USER}:${GITEA_TOKEN}@${GITEA_HOST}${REPO_PATH}"
+            
+            log "🔑 Using authenticated push URL"
+            
+            # Push with authenticated URL
+            if git push "$AUTH_URL" "$CURRENT_BRANCH" 2>/dev/null; then
+                log "✅ Pushed to remote"
+                echo "✅ Pushed to remote"
+            else
+                log "⚠️ Could not push to remote with auth (continuing anyway)"
+            fi
+        else
+            log "⚠️ No remote URL configured"
+        fi
     else
-        log "⚠️ Could not push to remote (continuing anyway)"
+        # Fallback: try push without authentication (may fail)
+        if git push origin "$CURRENT_BRANCH" 2>/dev/null; then
+            log "✅ Pushed to remote"
+            echo "✅ Pushed to remote"
+        else
+            log "⚠️ Could not push to remote - GITEA_TOKEN not available (continuing anyway)"
+        fi
     fi
     
     # Call preview verification hook

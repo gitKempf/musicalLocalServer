@@ -313,6 +313,9 @@ router.all('/:projectId/*', async (req: Request, res: Response) => {
         ...req.headers,
         // Use localhost as host to avoid Vite's allowedHosts security check
         host: `localhost:${internalPort}`,
+        // Disable compression so we can modify text content
+        // Otherwise we get gzipped binary that can't be modified
+        'accept-encoding': 'identity',
       },
     }, (proxyRes) => {
       const contentType = proxyRes.headers['content-type'] || '';
