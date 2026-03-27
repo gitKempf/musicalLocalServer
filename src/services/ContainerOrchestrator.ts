@@ -18,7 +18,7 @@ import { getPortRegistry, PortRegistry } from './PortRegistry';
 
 export interface ContainerConfig {
   projectId: string;
-  userId: number;
+  userId: string;
   sessionId: string;
   giteaToken?: string;
   giteaUser?: string;

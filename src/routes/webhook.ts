@@ -466,7 +466,7 @@ async function resolveProjectId(repoName: string): Promise<string | null> {
 /**
  * Get user ID for a project
  */
-async function getProjectUserId(projectId: string): Promise<number> {
+async function getProjectUserId(projectId: string): Promise<string> {
   try {
     const result = await query(
       `SELECT user_id FROM projects WHERE id = $1`,
@@ -480,7 +480,7 @@ async function getProjectUserId(projectId: string): Promise<number> {
     logger.debug('Could not get project user ID', { error });
   }
 
-  return 0; // Default user ID
+  return '0'; // Default user ID
 }
 
 export default router;

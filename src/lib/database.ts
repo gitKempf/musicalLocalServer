@@ -57,7 +57,7 @@ export async function initializeDatabase(): Promise<void> {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS projects (
         id VARCHAR(50) PRIMARY KEY,
-        user_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
         name VARCHAR(255) NOT NULL,
         description TEXT,
         template VARCHAR(50) DEFAULT 'react-native',
@@ -95,7 +95,7 @@ export async function initializeDatabase(): Promise<void> {
       CREATE TABLE IF NOT EXISTS sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         project_id VARCHAR(50) REFERENCES projects(id) ON DELETE CASCADE,
-        user_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
         session_path TEXT,
         status VARCHAR(50) DEFAULT 'active',
         turn_count INTEGER DEFAULT 0,

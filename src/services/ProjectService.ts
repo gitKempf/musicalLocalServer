@@ -8,7 +8,7 @@ import { logger } from '../lib/logger';
 
 export interface Project {
   id: string;
-  user_id: number;
+  user_id: string;
   name: string;
   description?: string;
   template: string;
@@ -30,7 +30,7 @@ export interface Project {
 
 export interface CreateProjectParams {
   id: string;
-  userId: number;
+  userId: string;
   name: string;
   description?: string;
   template?: string;
@@ -120,7 +120,7 @@ class ProjectService {
   /**
    * Get a project by its ID and user ID
    */
-  async getProject(projectId: string, userId: number): Promise<Project | null> {
+  async getProject(projectId: string, userId: string): Promise<Project | null> {
     try {
       const queryText = `
         SELECT * FROM projects
@@ -219,7 +219,7 @@ class ProjectService {
   /**
    * Delete a project (soft delete)
    */
-  async deleteProject(projectId: string, userId: number): Promise<{ id: string }> {
+  async deleteProject(projectId: string, userId: string): Promise<{ id: string }> {
     try {
       const queryText = `
         UPDATE projects
@@ -248,7 +248,7 @@ class ProjectService {
    * List user projects
    */
   async listUserProjects(
-    userId: number,
+    userId: string,
     options: ListProjectsOptions = {}
   ): Promise<Project[]> {
     try {

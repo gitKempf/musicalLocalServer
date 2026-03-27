@@ -28,7 +28,7 @@ export interface BuildConfig {
   commitHash: string;
   branch: string;
   repoUrl: string;
-  userId: number;
+  userId: string;
   pusher?: string;
   commitMessage?: string;
 }
